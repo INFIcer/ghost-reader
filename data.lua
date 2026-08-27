@@ -66,8 +66,8 @@ data:extend{
     enabled = false,
     energy_required = 0.5,
     ingredients = {
-      {type = "item", name = "electronic-circuit", amount = 5},
-      {type = "item", name = "advanced-circuit", amount = 5}
+      {type = "item", name = "construction-robot", amount = 1},
+      {type = "item", name = "steel-chest", amount = 1}
     },
     results = {
       {type = "item", name = "ghost-reader", amount = 1}
@@ -79,10 +79,14 @@ data:extend{
     icon = icon,
     icon_size = icon_size,
     prerequisites = {"construction-robotics"},
-    research_trigger = {
-      type = "craft-item",
-      item = "roboport",
-      count = 1
+    unit = {
+      count = 50,
+      ingredients = {
+        {"automation-science-pack", 1},  -- 红瓶
+        {"logistic-science-pack", 1},    -- 绿瓶
+        {"chemical-science-pack", 1}     -- 蓝瓶
+      },
+      time = 30
     },
     effects = {
       {type = "unlock-recipe", recipe = "ghost-reader"}

@@ -4,18 +4,20 @@
 -- GUI panel. It counts ghosts (entity + tile + upgrade) and outputs the per-item
 -- counts as vanilla item signals via its control-behavior slots.
 --
--- Two operating modes:
+-- Two scan-range modes:
 --   * Surface mode  : scans ALL ghosts on the whole surface.
 --   * Network mode  : scans ghosts inside the reader's logistics-network
 --                     construction area — the union (not the bounding box) of
 --                     every square construction area of the roboports in the
 --                     network the reader belongs to.
 --
--- The custom GUI shows a mode selector, a live status (current surface in the
--- form 【新地星】, or current network in the form 【网络#7】), a signal grid with
--- item icons, a refresh button and a close button.
+-- The custom GUI shows a scan-range mode selector, a filter (all / buildings /
+-- tiles / upgrades), a live status (current surface 【新地星】 or current network
+-- 【网络#7】), and the per-item signal counts. It refreshes in real time and has a
+-- close button.
 --
--- Unlock: crafting a roboport auto-researches the ghost-reader technology.
+-- Unlock: the technology uses a native `research_trigger` in data.lua — crafting
+-- one roboport unlocks the Ghost Reader (no control.lua code needed for that).
 
 local READER = "ghost-reader"
 local MAX_SLOTS = 18       -- constant-combinator slots per section
