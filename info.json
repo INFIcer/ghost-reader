@@ -5,7 +5,7 @@
   "author": "INFIcer",
   "contact": "",
   "homepage": "",
-  "description": "Adds a custom constant-combinator style entity (Ghost Reader) that reads every ghost inside the construction range of the logistics network it belongs to (entity ghosts, tile ghosts, upgrade requests) and outputs, as per-item circuit signals, the count of each. 添加自定义恒压器式实体「虚影读取器」：读取其所在物流网络建设范围内的所有虚影（建筑/地格/升级虚影），按物品把数量输出为电路信号。",
+  "description": "Adds a custom constant-combinator style entity (Ghost Reader) with a custom GUI panel. It reads ghosts (entity, tile and upgrade requests) and outputs the per-item counts as circuit signals, either for the whole surface or for its logistics network's construction area.",
   "factorio_version": "2.1",
   "dependencies": [
     "base >= 2.1.0"
