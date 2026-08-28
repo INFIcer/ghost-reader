@@ -1,20 +1,23 @@
 -- ghost-reader / control.lua
 --
 -- Ghost Reader (虚影读取器) — a constant-combinator style entity with a custom
--- GUI panel. It counts ghosts (entity + tile + upgrade) and outputs the per-item
--- counts as vanilla item signals via its control-behavior slots.
+-- GUI panel. It counts ghosts (entity + tile + upgrade) plus temporary item
+-- requests (item-request-proxy) and outputs the per-item counts as vanilla item
+-- signals via its control-behavior slots.
 --
 -- Two scan-range modes:
 --   * Surface mode  : scans ALL ghosts on the whole surface.
 --   * Network mode  : scans ghosts inside the reader's logistics-network
 --                     construction area — the union (not the bounding box) of
 --                     every square construction area of the roboports in the
---                     network the reader belongs to.
+--                     network the reader belongs to. IRPs (temporary item
+--                     requests) are served by construction robots, so they use
+--                     the same construction area.
 --
 -- The custom GUI shows a scan-range mode selector, a filter (all / buildings /
--- tiles / upgrades), a live status (current surface 【新地星】 or current network
--- 【网络#7】), and the per-item signal counts. It refreshes in real time and has a
--- close button.
+-- tiles / upgrades / temporary item requests), a live status (current surface
+-- 【新地星】 or current network 【网络#7】), and the per-item signal counts. It
+-- refreshes in real time and has a close button.
 --
 -- Unlock: the technology uses a native `research_trigger` in data.lua — crafting
 -- one roboport unlocks the Ghost Reader (no control.lua code needed for that).
@@ -30,6 +33,7 @@ local FILTER_ALL       = "all"
 local FILTER_BUILDINGS = "buildings"
 local FILTER_TILES     = "tiles"
 local FILTER_UPGRADES  = "upgrades"
+local FILTER_IRP       = "irp"       -- 临时物品请求 (item-request-proxy) only
 local DEFAULT_FILTER   = FILTER_ALL
 
 local GUI_FRAME  = "ghost_reader_gui"
@@ -185,8 +189,35 @@ local function scan_area(surface, area, counts, visited, filter)
   return counts
 end
 
+-- ---------------------------------------------------------------------------
+-- Count item-request-proxies (temporary item requests, e.g. set on a tile in
+-- remote view). Each IRP's requested items are summed (name -> quantity).
+-- ---------------------------------------------------------------------------
+local function scan_irp(surface, area, counts, visited)
+  local irps = surface.find_entities_filtered{area = area, type = "item-request-proxy"}
+  for _, g in ipairs(irps) do
+    if g.valid and center_in_area(g.position, area) then
+      local u = g.unit_number
+      if u then
+        if visited[u] then goto skip_irp end
+        visited[u] = true
+      end
+      local reqs = g.item_requests
+      if reqs then
+        for _, r in ipairs(reqs) do
+          local item = r and r.name
+          if item then counts[item] = (counts[item] or 0) + (r.count or 1) end
+        end
+      end
+      ::skip_irp::
+    end
+  end
+  return counts
+end
+
 -- Network mode: scan the union of the network roboports' square construction
--- areas (dedup across the squares, NOT a single bounding box).
+-- areas (dedup across the squares, NOT a single bounding box). IRPs are served
+-- by construction robots, so they are also counted against the construction area.
 local function get_counts_network(reader, filter)
   local net_id = reader_network_id(reader)
   if not net_id then return {} end
@@ -195,11 +226,16 @@ local function get_counts_network(reader, filter)
     if port.valid then
       local pnet = port.logistic_network
       if pnet and pnet.network_id == net_id then
-        local range = port.prototype and port.prototype.construction_radius
         local ppos = port.position
-        if range and ppos then
-          local area = {{ppos.x - range, ppos.y - range}, {ppos.x + range, ppos.y + range}}
-          scan_area(reader.surface, area, counts, visited, filter)
+        local crad = ppos and port.prototype and port.prototype.construction_radius
+        if crad then
+          local c_area = {{ppos.x - crad, ppos.y - crad}, {ppos.x + crad, ppos.y + crad}}
+          -- Buildings / tiles / upgrades: construction area.
+          scan_area(reader.surface, c_area, counts, visited, filter)
+          -- Item-request-proxies (temporary requests): construction area too.
+          if filter == FILTER_ALL or filter == FILTER_IRP then
+            scan_irp(reader.surface, c_area, counts, visited)
+          end
         end
       end
     end
@@ -210,7 +246,12 @@ end
 local function get_counts(reader)
   local filter = get_filter(reader.unit_number)
   if get_mode(reader.unit_number) == MODE_SURFACE then
-    return scan_area(reader.surface, nil, {}, {}, filter)
+    local counts, visited = {}, {}
+    scan_area(reader.surface, nil, counts, visited, filter)
+    if filter == FILTER_ALL or filter == FILTER_IRP then
+      scan_irp(reader.surface, nil, counts, visited)
+    end
+    return counts
   end
   return get_counts_network(reader, filter)
 end
@@ -266,6 +307,60 @@ local function mark_dirty()
   storage.dirty = true
 end
 
+-- An item-request-proxy was created (created_effect fired by data-updates.lua).
+-- Register it for destruction tracking and rescan on the same tick. Also record
+-- its requested-item "fingerprint" so on_tick can detect when construction bots
+-- partially supply it (item_requests shrink without the entity being destroyed,
+-- which fires no event).
+local function irp_fingerprint(irp)
+  local reqs = irp and irp.item_requests
+  if not reqs then return "" end
+  local parts = {}
+  for _, r in ipairs(reqs) do
+    if r and r.name then
+      parts[#parts+1] = tostring(r.name) .. "|" .. tostring(r.quality) .. ":" .. tostring(r.count or 1)
+    end
+  end
+  table.sort(parts)
+  return table.concat(parts, ";")
+end
+
+local function on_irp_created(event)
+  if event.effect_id ~= "gr-item-request-proxy" then return end
+  local e = event.source_entity
+  if e and e.valid and e.type == "item-request-proxy" then
+    pcall(function() script.register_on_object_destroyed(e) end)
+    local unit = e.unit_number
+    if unit then
+      storage.irp_snapshots = storage.irp_snapshots or {}
+      storage.irp_snapshots[unit] = {
+        surface_index = e.surface.index,
+        fingerprint = irp_fingerprint(e)
+      }
+    end
+  end
+  mark_dirty()
+end
+
+-- Rebuild the IRP snapshot table from currently-existing item-request-proxies.
+-- Called on load (on_configuration_changed does not fire on a plain load, and
+-- created_effect does not refire for already-existing IRPs), so that the poll
+-- keeps tracking partially-supplied IRPs across a save/load.
+local function sync_irp_snapshots()
+  storage.irp_snapshots = storage.irp_snapshots or {}
+  for _, surface in pairs(game.surfaces) do
+    for _, g in ipairs(surface.find_entities_filtered{type = "item-request-proxy"}) do
+      if g.valid and g.unit_number then
+        pcall(function() script.register_on_object_destroyed(g) end)
+        storage.irp_snapshots[g.unit_number] = {
+          surface_index = surface.index,
+          fingerprint = irp_fingerprint(g)
+        }
+      end
+    end
+  end
+end
+
 -- Any entity built that affects a reader's output (a ghost, a roboport that
 -- changes the network area, or the reader itself placed by copy/blueprint)
 -- triggers a rescan on the same tick.
@@ -286,11 +381,69 @@ local function on_roboport_removed(event)
   if e and e.valid and e.name == "roboport" then mark_dirty() end
 end
 
+-- Any entity was destroyed -> drop stale IRP snapshot (if any) and rescan.
+local function on_object_destroyed(event)
+  if event and event.type == defines.target_type.entity and event.useful_id then
+    local snaps = storage.irp_snapshots
+    if snaps then snaps[event.useful_id] = nil end
+  end
+  mark_dirty()
+end
+
 local needs_rescan = false -- set by on_load; not stored in storage
+local needs_irp_sync = false -- set by on_load; not stored in storage
 local refresh_all_open_gui -- forward declaration, defined below
 local find_reader -- forward declaration, defined below
 
+-- Item-request-proxies can be partially supplied by construction bots: their
+-- item_requests shrink while the entity stays alive, which fires no event. To
+-- keep the circuit output in sync we poll the tracked IRPs' fingerprints a few
+-- per tick (like item-request-proxy-events does) and mark dirty when they change.
+local IRP_POLL_PER_TICK = 8
+
+local function poll_irp_updates()
+  local snaps = storage.irp_snapshots
+  if not snaps or not next(snaps) then return end
+  local processed = 0
+  local prev = storage.irp_prev or nil
+  local first = prev
+  while processed < IRP_POLL_PER_TICK do
+    local unit = next(snaps, prev)
+    storage.irp_prev = unit
+    if not unit then break end
+    local data = snaps[unit]
+    if data then
+      local surface = data.surface_index and game.get_surface(data.surface_index)
+      local irp = nil
+      if surface then
+        for _, e in ipairs(surface.find_entities_filtered{type = "item-request-proxy"}) do
+          if e.unit_number == unit then irp = e; break end
+        end
+      end
+      if irp and irp.valid then
+        local fp = irp_fingerprint(irp)
+        if fp ~= data.fingerprint then
+          data.fingerprint = fp
+          mark_dirty()
+        end
+      else
+        snaps[unit] = nil -- gone; clean up
+      end
+    end
+    processed = processed + 1
+    if unit == first then break end
+  end
+end
+
 local function on_tick()
+  -- Rebuild IRP snapshots on the first tick after load (game is unavailable in
+  -- on_load; created_effect/on_configuration_changed don't fire for existing IRPs).
+  if needs_irp_sync then
+    needs_irp_sync = false
+    pcall(sync_irp_snapshots)
+  end
+  -- Keep partially-supplied IRPs in sync even though they fire no event.
+  poll_irp_updates()
   -- Event-driven: rescan only when something actually changed.
   if needs_rescan or storage.dirty then
     needs_rescan = false
@@ -373,11 +526,12 @@ local function build_gui(player, reader)
   local filter_flow = frame.add{type = "flow", direction = "horizontal"}
   filter_flow.add{type = "label", caption = {"gr-gui.filter"}}
   filter_flow.add{type = "drop-down", name = GUI_FILTER,
-    items = {{"gr-gui.filter-all"}, {"gr-gui.filter-buildings"}, {"gr-gui.filter-tiles"}, {"gr-gui.filter-upgrades"}},
+    items = {{"gr-gui.filter-all"}, {"gr-gui.filter-buildings"}, {"gr-gui.filter-tiles"}, {"gr-gui.filter-upgrades"}, {"gr-gui.filter-irp"}},
     selected_index = (filter == FILTER_ALL) and 1
       or (filter == FILTER_BUILDINGS) and 2
       or (filter == FILTER_TILES) and 3
-      or 4}
+      or (filter == FILTER_UPGRADES) and 4
+      or 5}
 
   -- 4. 当前输出信号 (current output signals)
   frame.add{type = "label", caption = {"gr-gui.output"}, style = "frame_subheading_label"}
@@ -460,7 +614,7 @@ local function on_gui_selection_state_changed(event)
   if e.name == GUI_MODE then
     set_mode(unit, (e.selected_index == 1) and MODE_SURFACE or MODE_NETWORK)
   elseif e.name == GUI_FILTER then
-    local filters = {FILTER_ALL, FILTER_BUILDINGS, FILTER_TILES, FILTER_UPGRADES}
+    local filters = {FILTER_ALL, FILTER_BUILDINGS, FILTER_TILES, FILTER_UPGRADES, FILTER_IRP}
     set_filter(unit, filters[e.selected_index] or FILTER_ALL)
   else
     return
@@ -483,10 +637,14 @@ script.on_event(defines.events.on_built_entity, on_entity_built)
 script.on_event(defines.events.on_robot_built_entity, on_entity_built)
 script.on_event(defines.events.script_raised_built, on_entity_built)
 script.on_event(defines.events.script_raised_revive, on_entity_built)
-script.on_event(defines.events.on_object_destroyed, mark_dirty)
+script.on_event(defines.events.on_object_destroyed, on_object_destroyed)
 script.on_event(defines.events.on_marked_for_upgrade, mark_dirty)
 script.on_event(defines.events.on_cancelled_upgrade, mark_dirty)
 script.on_event(defines.events.on_pre_ghost_upgraded, mark_dirty)
+
+-- An item-request-proxy was created -> rescan (this is how temporary item
+-- requests are discovered event-driven, without wide on_tick polling).
+script.on_event(defines.events.on_script_trigger_effect, on_irp_created)
 
 -- A roboport was mined/removed -> network construction areas may have changed.
 local roboport_filter = {{filter = "name", name = "roboport"}}
@@ -498,6 +656,7 @@ script.on_event(defines.events.script_raised_destroy, on_roboport_removed, robop
 -- Register existing ghosts on load so their removal also triggers a rescan.
 script.on_configuration_changed(function()
   storage.dirty = true
+  sync_irp_snapshots()
   for _, surface in pairs(game.surfaces) do
     for _, g in ipairs(surface.find_entities_filtered{type = {"entity-ghost", "tile-ghost"}}) do
       if g.valid then pcall(function() script.register_on_object_destroyed(g) end) end
@@ -507,4 +666,5 @@ end)
 
 script.on_load(function()
   needs_rescan = true -- do NOT touch storage here (not save/load stable)
+  needs_irp_sync = true -- rebuild IRP snapshots on first tick (game is nil here)
 end)
