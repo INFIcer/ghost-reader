@@ -36,11 +36,18 @@ local FILTER_UPGRADES  = "upgrades"
 local FILTER_IRP       = "irp"       -- 临时物品请求 (item-request-proxy) only
 local DEFAULT_FILTER   = FILTER_ALL
 
+-- Quantity mode: how supply and recycle counts are combined.
+local QTY_NET     = "net"      -- 供给 - 回收 (net shortage, may be negative)
+local QTY_SUPPLY  = "supply"   -- 只输出供给
+local QTY_RECYCLE = "recycle"  -- 只输出回收
+local DEFAULT_QTY = QTY_NET
+
 local GUI_FRAME  = "ghost_reader_gui"
 local GUI_TABLE  = "ghost_reader_table"
 local GUI_STATUS = "ghost_reader_status"
 local GUI_MODE   = "ghost_reader_mode"
 local GUI_FILTER = "ghost_reader_filter"
+local GUI_QTY    = "ghost_reader_qty"
 
 -- ---------------------------------------------------------------------------
 -- Item-name resolution (entity/tile prototype -> placing item)
@@ -86,6 +93,18 @@ local function set_filter(unit, filter)
   storage.readers[unit].filter = filter
 end
 
+local function get_qty(unit)
+  storage.readers = storage.readers or {}
+  local d = storage.readers[unit]
+  return (d and d.qty) or DEFAULT_QTY
+end
+
+local function set_qty(unit, qty)
+  storage.readers = storage.readers or {}
+  storage.readers[unit] = storage.readers[unit] or {}
+  storage.readers[unit].qty = qty
+end
+
 -- ---------------------------------------------------------------------------
 -- The logistics network the reader belongs to (or nil), and its id.
 -- ---------------------------------------------------------------------------
@@ -126,15 +145,21 @@ local function center_in_area(pos, area)
 end
 
 -- ---------------------------------------------------------------------------
--- Count ghosts (entity + tile + upgrade) inside an area. `visited` dedups ghosts
--- that fall in several overlapping areas. Only ghosts whose centre is inside the
--- area are counted.
+-- Count supply AND recycling requests inside an area.
+--
+-- `supply`   = items the network must RECEIVE (build ghosts, upgrade targets).
+-- `recycle`  = items the network will REMOVE / recover (deconstruction of
+--              buildings and tiles, and the original entity of an upgrade).
+-- `visited`  dedups entities that fall in several overlapping areas. Only
+-- entities whose centre is inside the area are counted. Each direction writes
+-- into its own table so the quantity mode can combine them later.
 -- ---------------------------------------------------------------------------
-local function scan_area(surface, area, counts, visited, filter)
+local function scan_area(surface, area, supply, recycle, visited, filter)
   local include_buildings = (filter == FILTER_ALL or filter == FILTER_BUILDINGS)
   local include_tiles     = (filter == FILTER_ALL or filter == FILTER_TILES)
   local include_upgrades  = (filter == FILTER_ALL or filter == FILTER_UPGRADES)
 
+  -- --- Supply: entity ghosts (build requests) ---
   if include_buildings then
     local ghosts = surface.find_entities_filtered{area = area, type = "entity-ghost"}
     for _, g in ipairs(ghosts) do
@@ -145,12 +170,13 @@ local function scan_area(surface, area, counts, visited, filter)
           visited[u] = true
         end
         local item = item_for_entity(g.ghost_name)
-        if item then counts[item] = (counts[item] or 0) + 1 end
+        if item then supply[item] = (supply[item] or 0) + 1 end
         ::skip_ghost::
       end
     end
   end
 
+  -- --- Supply: tile ghosts ---
   if include_tiles then
     local tiles = surface.find_entities_filtered{area = area, type = "tile-ghost"}
     for _, g in ipairs(tiles) do
@@ -161,12 +187,13 @@ local function scan_area(surface, area, counts, visited, filter)
           visited[u] = true
         end
         local item = item_for_tile(g.ghost_name)
-        if item then counts[item] = (counts[item] or 0) + 1 end
+        if item then supply[item] = (supply[item] or 0) + 1 end
         ::skip_tile::
       end
     end
   end
 
+  -- --- Supply (upgrade target) + Recycle (original entity) ---
   if include_upgrades then
     local marked = surface.find_entities_filtered{area = area, to_be_upgraded = true}
     for _, en in ipairs(marked) do
@@ -178,22 +205,78 @@ local function scan_area(surface, area, counts, visited, filter)
         end
         local target = en.get_upgrade_target()
         if target then
-          local item = item_for_entity(target.name)
-          if item then counts[item] = (counts[item] or 0) + 1 end
+          local new_item = item_for_entity(target.name)
+          if new_item then supply[new_item] = (supply[new_item] or 0) + 1 end
         end
+        local old_item = item_for_entity(en.name)
+        if old_item then recycle[old_item] = (recycle[old_item] or 0) + 1 end
         ::skip_upg::
       end
     end
   end
 
-  return counts
+  -- --- Recycle: buildings marked for deconstruction (red deconstruction planner).
+  -- `to_be_deconstructed` also matches deconstructible-tile-proxy; exclude those
+  -- (they are handled separately below). Note: `type` filter matches specific
+  -- prototype types (furnace, mining-drill, ...), not a generic "entity", so we
+  -- cannot use type="entity"; instead skip tile-proxies by name/type in the loop.
+  if include_buildings then
+    local deco = surface.find_entities_filtered{area = area, to_be_deconstructed = true}
+    for _, en in ipairs(deco) do
+      if en.type ~= "deconstructible-tile-proxy" and en.valid and center_in_area(en.position, area) then
+        local u = en.unit_number
+        if u then
+          if visited[u] then goto skip_deco end
+          visited[u] = true
+        end
+        -- Recycle the building itself.
+        local item = item_for_entity(en.name)
+        if item then recycle[item] = (recycle[item] or 0) + 1 end
+        -- If it is a container, its stored contents are also recovered.
+        for inv_index = 1, 40 do
+          local tinv = en.get_inventory(inv_index)
+          if not tinv then break end
+          for _, st in pairs(tinv.get_contents()) do
+            if st and st.name then
+              recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+            end
+          end
+        end
+        ::skip_deco::
+      end
+    end
+  end
+
+  -- --- Recycle: tiles marked for deconstruction (deconstructible-tile-proxy) ---
+  if include_tiles then
+    local tproxies = surface.find_entities_filtered{area = area, name = "deconstructible-tile-proxy"}
+    for _, p in ipairs(tproxies) do
+      if p.valid and center_in_area(p.position, area) then
+        local u = p.unit_number
+        if u then
+          if visited[u] then goto skip_tproxy end
+          visited[u] = true
+        end
+        local pos = p.position
+        if pos then
+          local tile = surface.get_tile(math.floor(pos.x), math.floor(pos.y))
+          local item = tile and item_for_tile(tile.name)
+          if item then recycle[item] = (recycle[item] or 0) + 1 end
+        end
+        ::skip_tproxy::
+      end
+    end
+  end
 end
 
 -- ---------------------------------------------------------------------------
--- Count item-request-proxies (temporary item requests, e.g. set on a tile in
--- remote view). Each IRP's requested items are summed (name -> quantity).
+-- Count item-request-proxies (temporary item requests). `supply` gets the
+-- requested items (item_requests); `recycle` gets items the proxy wants removed
+-- (removal_plan, e.g. a storage slot set for recycling in remote view). The
+-- removal quantity is the CURRENT amount of that item in the target entity's
+-- inventories (removal_plan only names items/positions, not counts).
 -- ---------------------------------------------------------------------------
-local function scan_irp(surface, area, counts, visited)
+local function scan_irp(surface, area, supply, recycle, visited)
   local irps = surface.find_entities_filtered{area = area, type = "item-request-proxy"}
   for _, g in ipairs(irps) do
     if g.valid and center_in_area(g.position, area) then
@@ -202,26 +285,61 @@ local function scan_irp(surface, area, counts, visited)
         if visited[u] then goto skip_irp end
         visited[u] = true
       end
+      -- If the IRP's target is itself marked for deconstruction, its request is
+      -- superseded by the building's recycling (which already counts the stored
+      -- contents). Skip both supply and recycle for it.
+      local tgt = g.proxy_target
+      if tgt and tgt.valid and tgt.to_be_deconstructed and tgt.to_be_deconstructed() then
+        goto skip_irp
+      end
+      -- Supply: requested items
       local reqs = g.item_requests
       if reqs then
         for _, r in ipairs(reqs) do
           local item = r and r.name
-          if item then counts[item] = (counts[item] or 0) + (r.count or 1) end
+          if item then supply[item] = (supply[item] or 0) + (r.count or 1) end
+        end
+      end
+      -- Recycle: removal plan. Each plan names an item (id.name); the quantity
+      -- is the current stock of that item in the target entity's inventories.
+      local removal = g.removal_plan
+      if removal and next(removal) then
+        local target = g.proxy_target
+        -- Precompute target inventory item totals (name -> total).
+        local stock = {}
+        if target and target.valid then
+          for inv_index = 1, 40 do
+            local tinv = target.get_inventory(inv_index)
+            if not tinv then break end
+            for _, st in pairs(tinv.get_contents()) do
+              if st and st.name then
+                stock[st.name] = (stock[st.name] or 0) + (st.count or 1)
+              end
+            end
+          end
+        end
+        for _, plan in ipairs(removal) do
+          local id = plan and plan.id
+          local item = id and id.name or (plan and plan.name)
+          if item then
+            local n = stock[item] or 1
+            recycle[item] = (recycle[item] or 0) + n
+          end
         end
       end
       ::skip_irp::
     end
   end
-  return counts
 end
 
 -- Network mode: scan the union of the network roboports' square construction
 -- areas (dedup across the squares, NOT a single bounding box). IRPs are served
 -- by construction robots, so they are also counted against the construction area.
+-- Returns {supply=..., recycle=...} two tables.
 local function get_counts_network(reader, filter)
   local net_id = reader_network_id(reader)
-  if not net_id then return {} end
-  local counts, visited = {}, {}
+  if not net_id then return {supply = {}, recycle = {}} end
+  local supply, recycle, visited = {}, {}, {}
   for _, port in ipairs(reader.surface.find_entities_filtered{name = "roboport"}) do
     if port.valid then
       local pnet = port.logistic_network
@@ -230,30 +348,53 @@ local function get_counts_network(reader, filter)
         local crad = ppos and port.prototype and port.prototype.construction_radius
         if crad then
           local c_area = {{ppos.x - crad, ppos.y - crad}, {ppos.x + crad, ppos.y + crad}}
-          -- Buildings / tiles / upgrades: construction area.
-          scan_area(reader.surface, c_area, counts, visited, filter)
-          -- Item-request-proxies (temporary requests): construction area too.
+          scan_area(reader.surface, c_area, supply, recycle, visited, filter)
           if filter == FILTER_ALL or filter == FILTER_IRP then
-            scan_irp(reader.surface, c_area, counts, visited)
+            scan_irp(reader.surface, c_area, supply, recycle, visited)
           end
         end
       end
     end
   end
-  return counts
+  return {supply = supply, recycle = recycle}
+end
+
+-- Returns {supply=..., recycle=...} for the reader's current range.
+local function get_dual_counts(reader)
+  local filter = get_filter(reader.unit_number)
+  if get_mode(reader.unit_number) == MODE_SURFACE then
+    local supply, recycle, visited = {}, {}, {}
+    scan_area(reader.surface, nil, supply, recycle, visited, filter)
+    if filter == FILTER_ALL or filter == FILTER_IRP then
+      scan_irp(reader.surface, nil, supply, recycle, visited)
+    end
+    return {supply = supply, recycle = recycle}
+  end
+  return get_counts_network(reader, filter)
+end
+
+-- Combine supply/recycle into a single item->value table according to qty mode.
+-- qty modes:
+--   NET     -> supply - recycle   (net shortage, may be negative)
+--   SUPPLY  -> supply only
+--   RECYCLE -> recycle only
+local function combine_counts(dual, qty)
+  local out = {}
+  if qty == QTY_SUPPLY then
+    for item, n in pairs(dual.supply) do out[item] = n end
+  elseif qty == QTY_RECYCLE then
+    for item, n in pairs(dual.recycle) do out[item] = n end
+  else -- QTY_NET
+    for item, n in pairs(dual.supply) do out[item] = (out[item] or 0) + n end
+    for item, n in pairs(dual.recycle) do out[item] = (out[item] or 0) - n end
+    for item, n in pairs(out) do if n == 0 then out[item] = nil end end
+  end
+  return out
 end
 
 local function get_counts(reader)
-  local filter = get_filter(reader.unit_number)
-  if get_mode(reader.unit_number) == MODE_SURFACE then
-    local counts, visited = {}, {}
-    scan_area(reader.surface, nil, counts, visited, filter)
-    if filter == FILTER_ALL or filter == FILTER_IRP then
-      scan_irp(reader.surface, nil, counts, visited)
-    end
-    return counts
-  end
-  return get_counts_network(reader, filter)
+  local qty = get_qty(reader.unit_number)
+  return combine_counts(get_dual_counts(reader), qty)
 end
 
 -- ---------------------------------------------------------------------------
@@ -286,11 +427,12 @@ local function update()
     for _, reader in ipairs(surface.find_entities_filtered{name = READER}) do
       local mode = get_mode(reader.unit_number)
       local filter = get_filter(reader.unit_number)
+      local qty = get_qty(reader.unit_number)
       local key
       if mode == MODE_SURFACE then
-        key = "S:" .. surface.index .. ":" .. filter
+        key = "S:" .. surface.index .. ":" .. filter .. ":" .. qty
       else
-        key = "N:" .. surface.index .. ":" .. tostring(reader_network_id(reader)) .. ":" .. filter
+        key = "N:" .. surface.index .. ":" .. tostring(reader_network_id(reader)) .. ":" .. filter .. ":" .. qty
       end
       local counts = cache[key]
       if not counts then
@@ -499,6 +641,7 @@ local function build_gui(player, reader)
 
   local mode = get_mode(reader.unit_number)
   local filter = get_filter(reader.unit_number)
+  local qty = get_qty(reader.unit_number)
   local frame = player.gui.screen.add{
     type = "frame", name = GUI_FRAME, direction = "vertical",
     tags = {unit = reader.unit_number}
@@ -533,7 +676,16 @@ local function build_gui(player, reader)
       or (filter == FILTER_UPGRADES) and 4
       or 5}
 
-  -- 4. 当前输出信号 (current output signals)
+  -- 4. 数量模式 (quantity mode)
+  local qty_flow = frame.add{type = "flow", direction = "horizontal"}
+  qty_flow.add{type = "label", caption = {"gr-gui.qty"}}
+  qty_flow.add{type = "drop-down", name = GUI_QTY,
+    items = {{"gr-gui.qty-net"}, {"gr-gui.qty-supply"}, {"gr-gui.qty-recycle"}},
+    selected_index = (qty == QTY_NET) and 1
+      or (qty == QTY_SUPPLY) and 2
+      or 3}
+
+  -- 5. 当前输出信号 (current output signals)
   frame.add{type = "label", caption = {"gr-gui.output"}, style = "frame_subheading_label"}
   frame.add{type = "table", name = GUI_TABLE, column_count = 1}
   rebuild_gui_table(frame, reader)
@@ -616,6 +768,9 @@ local function on_gui_selection_state_changed(event)
   elseif e.name == GUI_FILTER then
     local filters = {FILTER_ALL, FILTER_BUILDINGS, FILTER_TILES, FILTER_UPGRADES, FILTER_IRP}
     set_filter(unit, filters[e.selected_index] or FILTER_ALL)
+  elseif e.name == GUI_QTY then
+    local qtys = {QTY_NET, QTY_SUPPLY, QTY_RECYCLE}
+    set_qty(unit, qtys[e.selected_index] or QTY_NET)
   else
     return
   end
