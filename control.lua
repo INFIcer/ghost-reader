@@ -600,6 +600,8 @@ end
 -- ---------------------------------------------------------------------------
 -- Status text for the GUI: 【新地星】 / 【网络#7】
 -- ---------------------------------------------------------------------------
+-- Status value for the GUI: 【新地星】 / 【网络#7】 / 不在物流网络内
+-- (only the value; the "当前范围：" label is separate and left-aligned).
 local function status_localised(reader)
   local mode = get_mode(reader.unit_number)
   if mode == MODE_SURFACE then
@@ -608,13 +610,13 @@ local function status_localised(reader)
       if surface.planet then return surface.planet.prototype.localised_name end
       return surface.name
     end)
-    return {"", {"gr-gui.current-range"}, "【", (ok and name) or surface.name, "】"}
+    return {"", "【", (ok and name) or surface.name, "】"}
   end
   local net_id = reader_network_id(reader)
   if net_id then
-    return {"", {"gr-gui.current-range"}, "【", {"gr-gui.network-prefix"}, tostring(net_id), "】"}
+    return {"", "【", {"gr-gui.network-prefix"}, tostring(net_id), "】"}
   end
-  return {"", {"gr-gui.current-range"}, {"gr-gui.status-no-network"}}
+  return {"gr-gui.status-no-network"}
 end
 
 -- ---------------------------------------------------------------------------
@@ -626,10 +628,18 @@ local function rebuild_gui_table(frame, reader)
   local ok, counts = pcall(function() return get_counts(reader) end)
   if not ok or type(counts) ~= "table" then counts = {} end
   t.clear()
+  -- Present each signal borderless (transparent slot): an item icon button with
+  -- the quantity in its bottom-right corner (sprite-button `number`). The table
+  -- has a fixed column count, so signals flow across and wrap to the next row.
   for item, count in pairs(counts) do
     pcall(function()
-      t.add{type = "label", caption = {"", "[item=" .. item .. "]", "  ", tostring(count)},
+      local icon = t.add{type = "sprite-button", style = "transparent_slot",
+        sprite = "item/" .. item,
         tooltip = {"", "[item=" .. item .. "]", "  x", tostring(count)}}
+      icon.number = count
+      icon.style.width = 40
+      icon.style.height = 40
+      icon.style.padding = 4
     end)
   end
 end
@@ -642,55 +652,84 @@ local function build_gui(player, reader)
   local mode = get_mode(reader.unit_number)
   local filter = get_filter(reader.unit_number)
   local qty = get_qty(reader.unit_number)
+
+  -- Standard draggable window frame.
   local frame = player.gui.screen.add{
     type = "frame", name = GUI_FRAME, direction = "vertical",
     tags = {unit = reader.unit_number}
   }
+  frame.auto_center = true
+  frame.style.minimal_width = 260
 
-  -- title bar (single): title + close
-  local titlebar = frame.add{type = "flow", direction = "horizontal"}
-  titlebar.add{type = "label", caption = {"gr-gui.title"}, style = "frame_title"}
-  titlebar.add{type = "empty-widget"}
+  -- Standard titlebar: title + drag handle + close button. Both the title text
+  -- and the stretchable drag handle carry drag_target, so the whole titlebar
+  -- drags the window. They must NOT ignore interaction or dragging stops.
+  local titlebar = frame.add{type = "flow"}
+  local title_label = titlebar.add{type = "label", style = "frame_title",
+    caption = {"gr-gui.title"}}
+  title_label.drag_target = frame
+  local drag_space = titlebar.add{type = "empty-widget", style = "draggable_space_header"}
+  drag_space.drag_target = frame
+  drag_space.style.horizontally_stretchable = true
+  drag_space.style.height = 24
   titlebar.add{type = "sprite-button", name = "gr_gui_close", style = "frame_action_button",
-    sprite = "utility/close", hovered_sprite = "utility/close_black",
-    clicked_sprite = "utility/close_black", tooltip = {"gr-gui.close"}}
+    sprite = "utility/close", tooltip = {"gr-gui.close"}}
+
+  -- Content pane with standard padding.
+  local content = frame.add{type = "frame", name = "gr_gui_content",
+    style = "inside_shallow_frame_with_padding", direction = "vertical"}
 
   -- 1. 检索范围模式 (scan range mode)
-  local range_flow = frame.add{type = "flow", direction = "horizontal"}
+  local range_flow = content.add{type = "flow", direction = "horizontal"}
   range_flow.add{type = "label", caption = {"gr-gui.range-mode"}}
-  range_flow.add{type = "drop-down", name = GUI_MODE,
+  local range_pad = range_flow.add{type = "empty-widget"}
+  range_pad.style.horizontally_stretchable = true
+  local range_dd = range_flow.add{type = "drop-down", name = GUI_MODE,
     items = {{"gr-gui.mode-surface"}, {"gr-gui.mode-network"}},
     selected_index = (mode == MODE_SURFACE) and 1 or 2}
+  range_dd.style.width = 170
 
-  -- 2. 当前范围 (current range)
-  frame.add{type = "label", name = GUI_STATUS, caption = status_localised(reader)}
+  -- 2. 当前范围 (current range) — label left, value right-aligned
+  local status_flow = content.add{type = "flow", name = "gr_gui_status_flow",
+    direction = "horizontal"}
+  status_flow.add{type = "label", caption = {"gr-gui.current-range"}}
+  local status_pad = status_flow.add{type = "empty-widget"}
+  status_pad.style.horizontally_stretchable = true
+  status_flow.add{type = "label", name = GUI_STATUS, caption = status_localised(reader)}
 
   -- 3. 筛选模式 (filter mode)
-  local filter_flow = frame.add{type = "flow", direction = "horizontal"}
+  local filter_flow = content.add{type = "flow", direction = "horizontal"}
   filter_flow.add{type = "label", caption = {"gr-gui.filter"}}
-  filter_flow.add{type = "drop-down", name = GUI_FILTER,
+  local filter_pad = filter_flow.add{type = "empty-widget"}
+  filter_pad.style.horizontally_stretchable = true
+  local filter_dd = filter_flow.add{type = "drop-down", name = GUI_FILTER,
     items = {{"gr-gui.filter-all"}, {"gr-gui.filter-buildings"}, {"gr-gui.filter-tiles"}, {"gr-gui.filter-upgrades"}, {"gr-gui.filter-irp"}},
     selected_index = (filter == FILTER_ALL) and 1
       or (filter == FILTER_BUILDINGS) and 2
       or (filter == FILTER_TILES) and 3
       or (filter == FILTER_UPGRADES) and 4
       or 5}
+  filter_dd.style.width = 170
 
   -- 4. 数量模式 (quantity mode)
-  local qty_flow = frame.add{type = "flow", direction = "horizontal"}
+  local qty_flow = content.add{type = "flow", direction = "horizontal"}
   qty_flow.add{type = "label", caption = {"gr-gui.qty"}}
-  qty_flow.add{type = "drop-down", name = GUI_QTY,
+  local qty_pad = qty_flow.add{type = "empty-widget"}
+  qty_pad.style.horizontally_stretchable = true
+  local qty_dd = qty_flow.add{type = "drop-down", name = GUI_QTY,
     items = {{"gr-gui.qty-net"}, {"gr-gui.qty-supply"}, {"gr-gui.qty-recycle"}},
     selected_index = (qty == QTY_NET) and 1
       or (qty == QTY_SUPPLY) and 2
       or 3}
+  qty_dd.style.width = 170
 
   -- 5. 当前输出信号 (current output signals)
-  frame.add{type = "label", caption = {"gr-gui.output"}, style = "frame_subheading_label"}
-  frame.add{type = "table", name = GUI_TABLE, column_count = 1}
-  rebuild_gui_table(frame, reader)
+  content.add{type = "label", caption = {"gr-gui.output"}, style = "frame_subheading_label"}
+  local signal_table = content.add{type = "table", name = GUI_TABLE, column_count = 6}
+  signal_table.style.horizontal_spacing = 4
+  signal_table.style.vertical_spacing = 4
+  rebuild_gui_table(content, reader)
 
-  frame.force_auto_center()
   player.opened = frame
 end
 
@@ -698,9 +737,10 @@ local function refresh_status_and_table(player, reader)
   local frame = player.gui.screen[GUI_FRAME]
   if not (frame and frame.valid) then return end
   pcall(function()
-    local status = frame[GUI_STATUS]
+    local content = frame.gr_gui_content
+    local status = content and content.gr_gui_status_flow and content.gr_gui_status_flow[GUI_STATUS]
     if status and status.valid then status.caption = status_localised(reader) end
-    rebuild_gui_table(frame, reader)
+    rebuild_gui_table(content or frame, reader)
   end)
 end
 
