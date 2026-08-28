@@ -232,11 +232,20 @@ local function scan_area(surface, area, supply, recycle, visited, filter)
         -- Recycle the building itself.
         local item = item_for_entity(en.name)
         if item then recycle[item] = (recycle[item] or 0) + 1 end
-        -- If it is a container, its stored contents are also recovered.
+        -- Recover stored contents: container inventories AND module slots
+        -- (assembling machines, labs, etc. hold modules that are recovered too).
         for inv_index = 1, 40 do
           local tinv = en.get_inventory(inv_index)
           if not tinv then break end
           for _, st in pairs(tinv.get_contents()) do
+            if st and st.name then
+              recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+            end
+          end
+        end
+        local minv = en.get_module_inventory()
+        if minv then
+          for _, st in pairs(minv.get_contents()) do
             if st and st.name then
               recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
             end
@@ -252,12 +261,15 @@ local function scan_area(surface, area, supply, recycle, visited, filter)
     local tproxies = surface.find_entities_filtered{area = area, name = "deconstructible-tile-proxy"}
     for _, p in ipairs(tproxies) do
       if p.valid and center_in_area(p.position, area) then
-        local u = p.unit_number
-        if u then
-          if visited[u] then goto skip_tproxy end
-          visited[u] = true
-        end
+        -- Tile-proxies have no unit_number (unit_number is nil), so dedup by the
+        -- proxy's position (which is the tile centre) to avoid double-counting a
+        -- tile that falls in several overlapping roboport construction areas.
         local pos = p.position
+        local key = pos and (pos.x .. "," .. pos.y) or nil
+        if key then
+          if visited[key] then goto skip_tproxy end
+          visited[key] = true
+        end
         if pos then
           local tile = surface.get_tile(math.floor(pos.x), math.floor(pos.y))
           local item = tile and item_for_tile(tile.name)
@@ -449,6 +461,21 @@ local function mark_dirty()
   storage.dirty = true
 end
 
+-- Immediately rescan the circuit output, without waiting for on_tick. on_tick
+-- only runs while the game is actively simulating, so after a discrete event
+-- (e.g. a robot finishing a deconstruction) the dirty flag may never be consumed.
+-- Calling update() right here guarantees the circuit output reflects the change.
+-- We do NOT call refresh_all_open_gui() here: events can fire before the GUI
+-- handlers are defined during startup, and GUI panels are already refreshed on a
+-- fixed interval by on_tick. A dirty flag is still set as a fallback.
+local function request_update()
+  update()
+  mark_dirty()
+end
+
+-- A building/tile was marked for deconstruction. Register it for object-destroyed
+-- so that when a robot actually removes it, on_object_destroyed fires and the
+-- recycling signal is cleared (on_robot_mined_entity is not reliable for this).
 -- An item-request-proxy was created (created_effect fired by data-updates.lua).
 -- Register it for destruction tracking and rescan on the same tick. Also record
 -- its requested-item "fingerprint" so on_tick can detect when construction bots
@@ -467,6 +494,53 @@ local function irp_fingerprint(irp)
   return table.concat(parts, ";")
 end
 
+-- Fingerprint of everything stored in a target entity's container inventories
+-- AND its module slots. When a robot removes items/modules from a container being
+-- recycled, this changes even though the IRP's item_requests do not, so polling
+-- it lets us detect and refresh the recycling signal.
+local function target_stock_fingerprint(target)
+  if not target or not target.valid then return "" end
+  local parts = {}
+  for inv_index = 1, 40 do
+    local tinv = target.get_inventory(inv_index)
+    if not tinv then break end
+    for _, st in pairs(tinv.get_contents()) do
+      if st and st.name then
+        parts[#parts+1] = tostring(st.name) .. ":" .. tostring(st.count or 1)
+      end
+    end
+  end
+  local minv = target.get_module_inventory()
+  if minv then
+    for _, st in pairs(minv.get_contents()) do
+      if st and st.name then
+        parts[#parts+1] = tostring(st.name) .. ":" .. tostring(st.count or 1)
+      end
+    end
+  end
+  table.sort(parts)
+  return table.concat(parts, ";")
+end
+
+-- A building/tile was marked for deconstruction. Register it for object-destroyed
+-- and record its stock fingerprint so we can detect when a robot removes items or
+-- modules from the container (no reliable event fires for that, so we poll).
+local function on_decon_marked(event)
+  local e = event.entity
+  if e and e.valid then
+    pcall(function() script.register_on_object_destroyed(e) end)
+    local unit = e.unit_number
+    if unit then
+      storage.decon_snapshots = storage.decon_snapshots or {}
+      storage.decon_snapshots[unit] = {
+        surface_index = e.surface.index,
+        stock = target_stock_fingerprint(e)
+      }
+    end
+  end
+  request_update()
+end
+
 local function on_irp_created(event)
   if event.effect_id ~= "gr-item-request-proxy" then return end
   local e = event.source_entity
@@ -477,11 +551,12 @@ local function on_irp_created(event)
       storage.irp_snapshots = storage.irp_snapshots or {}
       storage.irp_snapshots[unit] = {
         surface_index = e.surface.index,
-        fingerprint = irp_fingerprint(e)
+        fingerprint = irp_fingerprint(e),
+        stock = target_stock_fingerprint(e.proxy_target)
       }
     end
   end
-  mark_dirty()
+  request_update()
 end
 
 -- Rebuild the IRP snapshot table from currently-existing item-request-proxies.
@@ -496,31 +571,31 @@ local function sync_irp_snapshots()
         pcall(function() script.register_on_object_destroyed(g) end)
         storage.irp_snapshots[g.unit_number] = {
           surface_index = surface.index,
-          fingerprint = irp_fingerprint(g)
+          fingerprint = irp_fingerprint(g),
+          stock = target_stock_fingerprint(g.proxy_target)
         }
       end
     end
   end
 end
 
--- Any entity built that affects a reader's output (a ghost, a roboport that
--- changes the network area, or the reader itself placed by copy/blueprint)
--- triggers a rescan on the same tick.
+-- Any entity built/placed that affects a reader's output triggers a rescan on
+-- the same tick. This includes ghosts, tile-proxies (tile deconstruction), the
+-- reader itself, and roboports. Ghosts are also registered for destruction so
+-- their removal triggers a rescan.
 local function on_entity_built(event)
   local e = event.entity
   if not (e and e.valid) then return end
   if e.type == "entity-ghost" or e.type == "tile-ghost" then
     pcall(function() script.register_on_object_destroyed(e) end)
-  elseif e.name ~= READER and e.name ~= "roboport" then
-    return
   end
-  mark_dirty()
+  request_update()
 end
 
 -- A roboport was mined -> the network construction areas may have changed.
 local function on_roboport_removed(event)
   local e = event.entity
-  if e and e.valid and e.name == "roboport" then mark_dirty() end
+  if e and e.valid and e.name == "roboport" then request_update() end
 end
 
 -- Any entity was destroyed -> drop stale IRP snapshot (if any) and rescan.
@@ -528,8 +603,10 @@ local function on_object_destroyed(event)
   if event and event.type == defines.target_type.entity and event.useful_id then
     local snaps = storage.irp_snapshots
     if snaps then snaps[event.useful_id] = nil end
+    local dsnaps = storage.decon_snapshots
+    if dsnaps then dsnaps[event.useful_id] = nil end
   end
-  mark_dirty()
+  request_update()
 end
 
 local needs_rescan = false -- set by on_load; not stored in storage
@@ -564,8 +641,10 @@ local function poll_irp_updates()
       end
       if irp and irp.valid then
         local fp = irp_fingerprint(irp)
-        if fp ~= data.fingerprint then
+        local stock = target_stock_fingerprint(irp.proxy_target)
+        if fp ~= data.fingerprint or stock ~= data.stock then
           data.fingerprint = fp
+          data.stock = stock
           mark_dirty()
         end
       else
@@ -574,6 +653,31 @@ local function poll_irp_updates()
     end
     processed = processed + 1
     if unit == first then break end
+  end
+end
+
+-- Poll deconstruction-marked containers' stock. When a robot removes items or
+-- modules from one, its stock fingerprint changes even though no event fires.
+local function poll_decon_snapshots()
+  local snaps = storage.decon_snapshots
+  if not snaps or not next(snaps) then return end
+  for unit, data in pairs(snaps) do
+    local surface = data.surface_index and game.get_surface(data.surface_index)
+    local ent = nil
+    if surface then
+      for _, e in ipairs(surface.find_entities_filtered{to_be_deconstructed = true}) do
+        if e.unit_number == unit then ent = e; break end
+      end
+    end
+    if ent and ent.valid then
+      local stock = target_stock_fingerprint(ent)
+      if stock ~= data.stock then
+        data.stock = stock
+        mark_dirty()
+      end
+    else
+      snaps[unit] = nil -- cancelled or gone
+    end
   end
 end
 
@@ -586,6 +690,8 @@ local function on_tick()
   end
   -- Keep partially-supplied IRPs in sync even though they fire no event.
   poll_irp_updates()
+  -- Detect items/modules being removed from deconstruction-marked containers.
+  poll_decon_snapshots()
   -- Event-driven: rescan only when something actually changed.
   if needs_rescan or storage.dirty then
     needs_rescan = false
@@ -833,9 +939,21 @@ script.on_event(defines.events.on_robot_built_entity, on_entity_built)
 script.on_event(defines.events.script_raised_built, on_entity_built)
 script.on_event(defines.events.script_raised_revive, on_entity_built)
 script.on_event(defines.events.on_object_destroyed, on_object_destroyed)
-script.on_event(defines.events.on_marked_for_upgrade, mark_dirty)
-script.on_event(defines.events.on_cancelled_upgrade, mark_dirty)
-script.on_event(defines.events.on_pre_ghost_upgraded, mark_dirty)
+script.on_event(defines.events.on_marked_for_upgrade, request_update)
+script.on_event(defines.events.on_cancelled_upgrade, request_update)
+script.on_event(defines.events.on_pre_ghost_upgraded, request_update)
+
+-- Deconstruction (recycling): a building/tile was marked for (or cancelled from)
+-- deconstruction -> its recycling signal changed. Also rescan when an entity is
+-- removed/replaced (e.g. an upgrade completing replaces the original entity).
+-- These call request_update() directly because on_tick may not run after a
+-- discrete event (the game may pause simulation), so the output must be refreshed
+-- immediately rather than waiting for the next tick.
+script.on_event(defines.events.on_marked_for_deconstruction, on_decon_marked)
+script.on_event(defines.events.on_cancelled_deconstruction, request_update)
+script.on_event(defines.events.on_entity_died, request_update)
+script.on_event(defines.events.on_player_mined_entity, request_update)
+script.on_event(defines.events.on_robot_mined_entity, request_update)
 
 -- An item-request-proxy was created -> rescan (this is how temporary item
 -- requests are discovered event-driven, without wide on_tick polling).
