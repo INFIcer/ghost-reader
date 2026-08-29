@@ -106,6 +106,31 @@ local function set_qty(unit, qty)
 end
 
 -- ---------------------------------------------------------------------------
+-- Ghost config inheritance: config changed on a READER GHOST must carry over to
+-- the real reader once it is built. A ghost and the built entity sit at the same
+-- position but have different unit_numbers, so we key by position.
+-- ---------------------------------------------------------------------------
+local function pos_key(surface_index, pos)
+  if not (pos and pos.x and pos.y) then return nil end
+  return surface_index .. ":" .. math.floor(pos.x) .. "," .. math.floor(pos.y)
+end
+
+-- Persist the config of the entity (real or ghost) at its position, so that when
+-- the ghost is later built, the real reader inherits it.
+local function save_config_at_pos(entity)
+  if not (entity and entity.valid and entity.position) then return end
+  local unit = entity.unit_number
+  if not unit then return end
+  local key = pos_key(entity.surface.index, entity.position)
+  storage.ghost_cfg = storage.ghost_cfg or {}
+  storage.ghost_cfg[key] = {
+    mode = get_mode(unit),
+    filter = get_filter(unit),
+    qty = get_qty(unit)
+  }
+end
+
+-- ---------------------------------------------------------------------------
 -- The logistics network the reader belongs to (or nil), and its id.
 -- ---------------------------------------------------------------------------
 local function reader_network(reader)
@@ -414,6 +439,150 @@ local function get_counts(reader)
 end
 
 -- ---------------------------------------------------------------------------
+-- Config persistence via blueprint tags (bplib).
+--
+-- The reader's mode/filter/qty live in mod storage (storage.readers[unit]).
+-- To make them survive copy / blueprint WITHOUT polluting the circuit output,
+-- we use bplib: when a reader is extracted into a user blueprint, bplib raises
+-- "bplib-extract" and we write the config into the blueprint's per-entity tags.
+-- When that blueprint is later placed (on_pre_build -> "bplib-positions" /
+-- "bplib-overlaps"), we read the tags back and apply them to the built reader.
+--
+-- Crucially we only act on entities named READER ("ghost-reader"), so a vanilla
+-- constant-combinator is never tagged/mistaken for a reader (no cross-copy).
+--
+-- Tag keys are prefixed with "gr" to avoid colliding with other mods' tags.
+-- ---------------------------------------------------------------------------
+local TAG_MODE   = "gr_mode"
+local TAG_FILTER = "gr_filter"
+local TAG_QTY    = "gr_qty"
+
+-- Read a reader's config straight from storage. Never touches the circuit.
+local function reader_config(unit)
+  local d = storage.readers and storage.readers[unit]
+  return {
+    mode = (d and d.mode) or DEFAULT_MODE,
+    filter = (d and d.filter) or DEFAULT_FILTER,
+    qty = (d and d.qty) or DEFAULT_QTY,
+  }
+end
+
+local function apply_config(unit, cfg)
+  if not (type(unit) == "number") then return end
+  storage.readers = storage.readers or {}
+  storage.readers[unit] = storage.readers[unit] or {}
+  if cfg.mode then storage.readers[unit].mode = cfg.mode end
+  if cfg.filter then storage.readers[unit].filter = cfg.filter end
+  if cfg.qty then storage.readers[unit].qty = cfg.qty end
+end
+
+-- Write a reader's config into a blueprint entity's tags.
+local function write_reader_tags(blueprint, index, reader)
+  local cfg = reader_config(reader.unit_number)
+  pcall(function()
+    blueprint.set_blueprint_entity_tags(index, {
+      [TAG_MODE] = cfg.mode,
+      [TAG_FILTER] = cfg.filter,
+      [TAG_QTY] = cfg.qty,
+    })
+  end)
+end
+
+-- Read config from a blueprint entity's tags (nil if absent).
+local function read_reader_tags(blueprint, index)
+  local ok, tags = pcall(function() return blueprint.get_blueprint_entity_tags(index) end)
+  if not (ok and tags) then return nil end
+  local cfg = {}
+  if tags[TAG_MODE] then cfg.mode = tags[TAG_MODE] end
+  if tags[TAG_FILTER] then cfg.filter = tags[TAG_FILTER] end
+  if tags[TAG_QTY] then cfg.qty = tags[TAG_QTY] end
+  if cfg.mode or cfg.filter or cfg.qty then return cfg end
+  return nil
+end
+
+-- bplib-extract: a reader (real or ghost) was copied into a user blueprint ->
+-- save its config into the blueprint's per-entity tags. Only READER entities are
+-- handled; a vanilla constant-combinator is never tagged.
+local function is_reader_entity(en)
+  return en and en.valid
+    and (en.name == READER or (en.type == "entity-ghost" and en.ghost_name == READER))
+end
+
+local function on_bplib_extract(event)
+  if not (event and event.blueprint and event.entities) then return end
+  local tagged = 0
+  local total = 0
+  for index, entity in pairs(event.entities) do
+    total = total + 1
+    if is_reader_entity(entity) then
+      local cfg = reader_config(entity.unit_number)
+      log("ghost-reader: bplib-extract tag idx="..tostring(index).." unit="..tostring(entity.unit_number).." name="..tostring(entity.name).." cfg="..tostring(cfg.mode).."/"..tostring(cfg.filter).."/"..tostring(cfg.qty))
+      write_reader_tags(event.blueprint, index, entity)
+      tagged = tagged + 1
+    end
+  end
+  if tagged == 0 then
+    log("ghost-reader: bplib-extract fired but no reader matched (total entities="..tostring(total)..")")
+  end
+end
+
+-- bplib-positions: a blueprint containing readers is about to be placed. The
+-- event gives each blueprint entity's future world position. Record any config
+-- carried in the tags, keyed by world position, so the built reader can inherit
+-- it (bplib-overlaps handles pre-existing readers separately).
+local function on_bplib_positions(event)
+  if not (event and event.blueprint and event.positions) then return end
+  local entities = event.blueprint.get_blueprint_entities()
+  local recorded = 0
+  for index, pos in pairs(event.positions) do
+    local e = entities and entities[index]
+    if e and e.name == READER then
+      local cfg = read_reader_tags(event.blueprint, index)
+      if cfg then
+        local key = pos_key(event.surface_index or 1, pos)
+        if key then
+          storage.pending_tags = storage.pending_tags or {}
+          storage.pending_tags[key] = cfg
+          recorded = recorded + 1
+          log("ghost-reader: bplib-positions recorded key="..tostring(key).." cfg="..tostring(cfg.mode).."/"..tostring(cfg.filter).."/"..tostring(cfg.qty))
+        else
+          log("ghost-reader: bplib-positions reader idx="..tostring(index).." had nil pos")
+        end
+      else
+        log("ghost-reader: bplib-positions reader idx="..tostring(index).." but no tags found")
+      end
+    end
+  end
+  if recorded == 0 then
+    log("ghost-reader: bplib-positions fired, no reader tagged (positions count="..tostring(#event.positions or 0)..")")
+  end
+end
+
+-- bplib-overlaps: placing a blueprint whose reader overlaps an existing reader
+-- (real or ghost) in the world -> copy the blueprint's config onto it.
+local function on_bplib_overlaps(event)
+  if not (event and event.blueprint and event.overlaps) then return end
+  local entities = event.blueprint.get_blueprint_entities()
+  for index, overlapped in pairs(event.overlaps) do
+    if overlapped and overlapped.valid then
+      local is_reader = overlapped.name == READER
+        or (overlapped.type == "entity-ghost" and overlapped.ghost_name == READER)
+      if is_reader then
+        local e = entities and entities[index]
+        if e and e.name == READER then
+          local cfg = read_reader_tags(event.blueprint, index)
+          if cfg and overlapped.unit_number then
+            apply_config(overlapped.unit_number, cfg)
+            save_config_at_pos(overlapped)
+            request_update()
+          end
+        end
+      end
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
 -- Write counts into the reader's control-behavior slots (vanilla item signals).
 -- ---------------------------------------------------------------------------
 local function write_outputs(reader, counts)
@@ -592,8 +761,71 @@ local function on_entity_built(event)
   if not (e and e.valid) then return end
   if e.type == "entity-ghost" or e.type == "tile-ghost" then
     pcall(function() script.register_on_object_destroyed(e) end)
+    -- Remember a reader ghost's config so it can be inherited when built.
+    if e.type == "entity-ghost" and e.ghost_name == READER then
+      local unit = e.unit_number
+      local key = pos_key(e.surface.index, e.position)
+      -- The ghost carries config copied from the blueprint's per-entity tags
+      -- (gr_mode/gr_filter/gr_qty). This is the primary source and works for any
+      -- placement method (blueprint tool, Ctrl+C/V paste, robot build).
+      local cfg = nil
+      if e.tags then
+        local t = e.tags
+        if t[TAG_MODE] or t[TAG_FILTER] or t[TAG_QTY] then
+          cfg = {}
+          if t[TAG_MODE] then cfg.mode = t[TAG_MODE] end
+          if t[TAG_FILTER] then cfg.filter = t[TAG_FILTER] end
+          if t[TAG_QTY] then cfg.qty = t[TAG_QTY] end
+        end
+      end
+      -- Fallback: bplib-positions recorded config keyed by world position.
+      if not cfg then cfg = storage.pending_tags and storage.pending_tags[key] end
+      log("ghost-reader: reader ghost built pos_key="..tostring(key).." cfg="..tostring(cfg and (cfg.mode.."/"..cfg.filter.."/"..cfg.qty)).." unit="..tostring(unit).." tags="..tostring(e.tags and e.tags[TAG_MODE]))
+      if cfg and unit then
+        apply_config(unit, cfg)
+        if storage.pending_tags then storage.pending_tags[key] = nil end
+      end
+      save_config_at_pos(e)
+    end
+  elseif e.name == READER then
+    -- A real reader was just built. Inherit config from either:
+    --   * a reader ghost that sat at this position (storage.ghost_cfg), or
+    --   * a blueprint placed directly here (storage.pending_tags, from bplib).
+    local unit = e.unit_number
+    local key = pos_key(e.surface.index, e.position)
+    local cfg = storage.ghost_cfg and storage.ghost_cfg[key]
+    if not cfg then cfg = storage.pending_tags and storage.pending_tags[key] end
+    log("ghost-reader: reader built pos_key="..tostring(key).." ghost_cfg="..tostring(cfg and (cfg.mode.."/"..cfg.filter.."/"..cfg.qty)).." unit="..tostring(unit))
+    if cfg then
+      if unit then apply_config(unit, cfg) end
+      if storage.ghost_cfg then storage.ghost_cfg[key] = nil end
+      if storage.pending_tags then storage.pending_tags[key] = nil end
+    end
   end
   request_update()
+end
+
+-- Copy/paste of entity settings: when a player copies a configured reader and
+-- pastes it onto a reader ghost/entity (or copies its settings via shift+click),
+-- inherit the source reader's mode/filter/qty. The event carries the copied-from
+-- entity as `source` and the pasted-to target as `destination`.
+local function on_settings_pasted(event)
+  local source = event.source
+  local target = event.destination
+  if not (source and source.valid and target and target.valid) then return end
+  local is_reader = function(en)
+    return en.name == READER or (en.type == "entity-ghost" and en.ghost_name == READER)
+  end
+  if not is_reader(source) or not is_reader(target) then return end
+  -- Read the source's config from storage (live readers store it there).
+  local cfg = reader_config(source.unit_number)
+  local tgt_unit = target.unit_number
+  if cfg and tgt_unit then
+    apply_config(tgt_unit, cfg)
+    -- Keep the ghost config at the target's position in sync for build inheritance.
+    save_config_at_pos(target)
+    request_update()
+  end
 end
 
 -- A roboport was mined -> the network construction areas may have changed.
@@ -870,8 +1102,14 @@ end
 
 find_reader = function(unit)
   for _, surface in pairs(game.surfaces) do
-    local r = surface.find_entities_filtered{name = READER}
-    for _, e in ipairs(r) do if e.unit_number == unit then return e end end
+    -- Real readers
+    for _, e in ipairs(surface.find_entities_filtered{name = READER}) do
+      if e.unit_number == unit then return e end
+    end
+    -- Reader ghosts (ghost_name == READER)
+    for _, e in ipairs(surface.find_entities_filtered{type = "entity-ghost"}) do
+      if e.unit_number == unit and e.ghost_name == READER then return e end
+    end
   end
   return nil
 end
@@ -879,7 +1117,15 @@ end
 local function on_gui_opened(event)
   if event.gui_type ~= defines.gui_type.entity then return end
   local entity = event.entity
-  if not (entity and entity.valid and entity.name == READER) then return end
+  if not (entity and entity.valid) then return end
+  -- Match either a real reader or a reader ghost (a ghost of the reader placed by
+  -- blueprint/remote view). A ghost's `name` is "entity-ghost"; its `ghost_name`
+  -- holds the real entity name.
+  local is_reader = (entity.name == READER)
+  if not is_reader then
+    is_reader = (entity.type == "entity-ghost" and entity.ghost_name == READER)
+  end
+  if not is_reader then return end
   local player = game.get_player(event.player_index)
   if player then build_gui(player, entity) end
 end
@@ -924,6 +1170,8 @@ local function on_gui_selection_state_changed(event)
   else
     return
   end
+  -- Keep the ghost config at this position in sync so it is inherited when built.
+  save_config_at_pos(reader)
   update() -- immediately refresh the circuit output for the new selection
   refresh_status_and_table(player, reader)
 end
@@ -943,6 +1191,43 @@ script.on_event(defines.events.on_robot_built_entity, on_entity_built)
 script.on_event(defines.events.script_raised_built, on_entity_built)
 script.on_event(defines.events.script_raised_revive, on_entity_built)
 script.on_event(defines.events.on_object_destroyed, on_object_destroyed)
+-- Copy/paste settings onto a reader (or reader ghost) inherits its config.
+if defines.events.on_entity_settings_pasted then
+  script.on_event(defines.events.on_entity_settings_pasted, on_settings_pasted)
+end
+
+-- Direct fallback for on_player_setup_blueprint: tag readers into the blueprint
+-- being created, using event.stack + event.mapping directly. This is more robust
+-- than relying solely on bplib-extract (which needs bplib to resolve the blueprint
+-- object). We tag the SAME gr_* keys, so placement read-back is shared.
+local function on_player_setup_blueprint(event)
+  local stack = event.stack
+  if not (stack and stack.valid_for_read and event.mapping) then return end
+  local mapping = event.mapping.get()
+  if not mapping then return end
+  for index, entity in pairs(mapping) do
+    if is_reader_entity(entity) then
+      local cfg = reader_config(entity.unit_number)
+      pcall(function()
+        stack.set_blueprint_entity_tags(index, {
+          [TAG_MODE] = cfg.mode,
+          [TAG_FILTER] = cfg.filter,
+          [TAG_QTY] = cfg.qty,
+        })
+      end)
+      log("ghost-reader: direct setup_blueprint tagged idx="..tostring(index).." cfg="..tostring(cfg.mode).."/"..tostring(cfg.filter).."/"..tostring(cfg.qty))
+    end
+  end
+end
+
+-- bplib: persist a reader's config into blueprint tags on extraction, and apply
+-- it back when the blueprint is placed (covers copy-paste AND blueprints).
+script.on_event("bplib-extract", on_bplib_extract)
+script.on_event("bplib-positions", on_bplib_positions)
+script.on_event("bplib-overlaps", on_bplib_overlaps)
+if defines.events.on_player_setup_blueprint then
+  script.on_event(defines.events.on_player_setup_blueprint, on_player_setup_blueprint)
+end
 script.on_event(defines.events.on_marked_for_upgrade, request_update)
 script.on_event(defines.events.on_cancelled_upgrade, request_update)
 script.on_event(defines.events.on_pre_ghost_upgraded, request_update)

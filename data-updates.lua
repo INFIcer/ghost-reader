@@ -22,3 +22,20 @@ if data.raw["item-request-proxy"] and data.raw["item-request-proxy"]["item-reque
     }}
   }
 end
+
+-- bplib: ask bplib to raise "bplib-extract" whenever a ghost-reader is copied
+-- into a user blueprint, so control.lua can persist its config into the
+-- blueprint's tags. Runs here (after bplib's data.lua) so the mod-data exists.
+-- Only the reader is registered -- a vanilla constant-combinator is never
+-- tagged, so its config can never be copied onto a reader (and vice versa).
+if data.raw["mod-data"] and data.raw["mod-data"]["bplib"] then
+  -- Register the real reader AND its ghost form. bplib matches entities by
+  -- `entity.name`, so a reader ghost (name "entity-ghost") needs its own entry;
+  -- control.lua filters by ghost_name so a vanilla ghost is never tagged.
+  data.raw["mod-data"]["bplib"].data.extract_entity_names["ghost-reader"] = true
+  data.raw["mod-data"]["bplib"].data.extract_entity_names["entity-ghost"] = true
+  data.raw["mod-data"]["bplib"].data.position_entity_names["ghost-reader"] = true
+  data.raw["mod-data"]["bplib"].data.position_entity_names["entity-ghost"] = true
+  data.raw["mod-data"]["bplib"].data.overlap_entity_names["ghost-reader"] = true
+  data.raw["mod-data"]["bplib"].data.overlap_entity_names["entity-ghost"] = true
+end
