@@ -509,6 +509,12 @@ local function read_reader_tags(blueprint, index)
   return nil
 end
 
+-- Forward declaration: request_update is defined later in the file. The bplib
+-- handlers below call it, and in Lua a `local function` is only in scope from its
+-- declaration onward, so without this forward declaration those calls would see
+-- a nil `request_update` at runtime.
+local request_update
+
 -- bplib-extract: a reader (real or ghost) was copied into a user blueprint ->
 -- save its config into the blueprint's per-entity tags. Only READER entities are
 -- handled; a vanilla constant-combinator is never tagged.
@@ -519,19 +525,10 @@ end
 
 local function on_bplib_extract(event)
   if not (event and event.blueprint and event.entities) then return end
-  local tagged = 0
-  local total = 0
   for index, entity in pairs(event.entities) do
-    total = total + 1
     if is_reader_entity(entity) then
-      local cfg = reader_config(entity.unit_number)
-      log("ghost-reader: bplib-extract tag idx="..tostring(index).." unit="..tostring(entity.unit_number).." name="..tostring(entity.name).." cfg="..tostring(cfg.mode).."/"..tostring(cfg.filter).."/"..tostring(cfg.qty))
       write_reader_tags(event.blueprint, index, entity)
-      tagged = tagged + 1
     end
-  end
-  if tagged == 0 then
-    log("ghost-reader: bplib-extract fired but no reader matched (total entities="..tostring(total)..")")
   end
 end
 
@@ -542,7 +539,6 @@ end
 local function on_bplib_positions(event)
   if not (event and event.blueprint and event.positions) then return end
   local entities = event.blueprint.get_blueprint_entities()
-  local recorded = 0
   for index, pos in pairs(event.positions) do
     local e = entities and entities[index]
     if e and e.name == READER then
@@ -552,18 +548,9 @@ local function on_bplib_positions(event)
         if key then
           storage.pending_tags = storage.pending_tags or {}
           storage.pending_tags[key] = cfg
-          recorded = recorded + 1
-          log("ghost-reader: bplib-positions recorded key="..tostring(key).." cfg="..tostring(cfg.mode).."/"..tostring(cfg.filter).."/"..tostring(cfg.qty))
-        else
-          log("ghost-reader: bplib-positions reader idx="..tostring(index).." had nil pos")
         end
-      else
-        log("ghost-reader: bplib-positions reader idx="..tostring(index).." but no tags found")
       end
     end
-  end
-  if recorded == 0 then
-    log("ghost-reader: bplib-positions fired, no reader tagged (positions count="..tostring(#event.positions or 0)..")")
   end
 end
 
@@ -672,7 +659,7 @@ end
 -- We do NOT call refresh_all_open_gui() here: events can fire before the GUI
 -- handlers are defined during startup, and GUI panels are already refreshed on a
 -- fixed interval by on_tick. A dirty flag is still set as a fallback.
-local function request_update()
+request_update = function()
   update()
   mark_dirty()
 end
