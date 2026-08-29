@@ -1,6 +1,6 @@
 # Ghost Reader（虚影读取器）
 
-**版本 1.1.3** · 适用于 Factorio 2.1（含太空时代）
+**版本 1.1.4** · 适用于 Factorio 2.1（含太空时代）
 
 在原版游戏中，建设机器人的任务无法通过信号获取，但这对于自动化建设非常重要，本 mod 着重解决此问题。mod 添加一个新实体，它读取所在表面或所在物流网络范围内的虚影数量并输出为电路信号，可使用 GUI 进行详细配置。支持调整筛选模式（实体|地格|升级|物品）和数量模式（供给请求|回收请求）。
 
@@ -118,7 +118,7 @@ Mod 优先采用事件驱动，而非每帧轮询：
 
 ```
 ghost-reader/
-├── info.json            # Mod 元数据（name=ghost-reader, version=1.1.3）
+├── info.json            # Mod 元数据（name=ghost-reader, version=1.1.4）
 ├── data.lua             # 实体/物品/配方/科技 + 贴图重定向
 ├── data-updates.lua     # 为读取物品请求挂创建效果
 ├── control.lua          # 扫描、双向计数、信号输出、GUI、事件驱动
