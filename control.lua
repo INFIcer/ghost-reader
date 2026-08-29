@@ -738,7 +738,9 @@ local function on_decon_marked(event)
       storage.decon_snapshots = storage.decon_snapshots or {}
       storage.decon_snapshots[unit] = {
         surface_index = e.surface.index,
-        stock = target_stock_fingerprint(e)
+        stock = target_stock_fingerprint(e),
+        pos_x = e.position and e.position.x,
+        pos_y = e.position and e.position.y,
       }
     end
   end
@@ -781,6 +783,26 @@ local function sync_irp_snapshots()
           stock = target_stock_fingerprint(g.proxy_target),
           pos_x = g.position and g.position.x,
           pos_y = g.position and g.position.y,
+        }
+      end
+    end
+  end
+end
+
+-- Rebuild deconstruction-marked snapshots from currently-existing marked entities.
+-- Like IRPs, the game does not refire the decon event for already-marked entities
+-- on a plain load, so re-sync so the poll keeps tracking their stock/position.
+local function sync_decon_snapshots()
+  storage.decon_snapshots = storage.decon_snapshots or {}
+  for _, surface in pairs(game.surfaces) do
+    for _, e in ipairs(surface.find_entities_filtered{to_be_deconstructed = true}) do
+      if e.valid and e.unit_number then
+        pcall(function() script.register_on_object_destroyed(e) end)
+        storage.decon_snapshots[e.unit_number] = {
+          surface_index = surface.index,
+          stock = target_stock_fingerprint(e),
+          pos_x = e.position and e.position.x,
+          pos_y = e.position and e.position.y,
         }
       end
     end
@@ -1049,6 +1071,10 @@ end
 
 -- Poll deconstruction-marked containers' stock. When a robot removes items or
 -- modules from one, its stock fingerprint changes even though no event fires.
+-- Also track position: a marked-for-deconstruction MOVING entity (e.g. a train
+-- wagon being pulled by its locomotive) can enter/leave the scan area, changing
+-- how many deconstruction-marked entities are counted as recycling. No event
+-- fires for that, so we compare positions each tick.
 local function poll_decon_snapshots()
   local snaps = storage.decon_snapshots
   if not snaps or not next(snaps) then return end
@@ -1062,22 +1088,28 @@ local function poll_decon_snapshots()
     end
     if ent and ent.valid then
       local stock = target_stock_fingerprint(ent)
-      if stock ~= data.stock then
+      local moved = ent.position
+        and (ent.position.x ~= data.pos_x or ent.position.y ~= data.pos_y)
+      if stock ~= data.stock or moved then
         data.stock = stock
+        data.pos_x = ent.position and ent.position.x
+        data.pos_y = ent.position and ent.position.y
         mark_dirty()
       end
     else
-      snaps[unit] = nil -- cancelled or gone
+      snaps[unit] = nil -- cancelled or gone (e.g. decon mark cleared when a train moved)
     end
   end
 end
 
 local function on_tick()
-  -- Rebuild IRP snapshots on the first tick after load (game is unavailable in
-  -- on_load; created_effect/on_configuration_changed don't fire for existing IRPs).
+  -- Rebuild IRP + decon snapshots on the first tick after load (game is
+  -- unavailable in on_load; created_effect / on_configuration_changed don't fire
+  -- for already-existing IRPs or already-marked-for-deconstruction entities).
   if needs_irp_sync then
     needs_irp_sync = false
     pcall(sync_irp_snapshots)
+    pcall(sync_decon_snapshots)
   end
   -- Keep partially-supplied IRPs in sync even though they fire no event.
   poll_irp_updates()
@@ -1449,6 +1481,7 @@ script.on_event(defines.events.script_raised_destroy, on_roboport_removed, robop
 script.on_configuration_changed(function()
   storage.dirty = true
   sync_irp_snapshots()
+  sync_decon_snapshots()
   for _, surface in pairs(game.surfaces) do
     for _, g in ipairs(surface.find_entities_filtered{type = {"entity-ghost", "tile-ghost"}}) do
       if g.valid then pcall(function() script.register_on_object_destroyed(g) end) end
