@@ -98,10 +98,48 @@ local function mineable_products(name)
   return out
 end
 
+-- Collect the items an entity carries that are NOT stored in a regular
+-- inventory slot: items travelling on a transport belt's lines, and the item
+-- held in an inserter's hand. Returns a table { [item_name] = count }.
+local function extra_carry_items(en)
+  local et = en.type
+  local out = {}
+  -- Transport belts store cargo in transport lines, not inventories. The number
+  -- of lines varies by type: a normal belt has 2, an underground belt 4, and a
+  -- splitter 8 (its 4 internal cache slots are extra lines 5-8). Iterate until
+  -- get_transport_line returns nil, with a safe upper bound.
+  if et == "transport-belt" or et == "underground-belt" or et == "splitter" then
+    for line_index = 1, 12 do
+      local ok, tl = pcall(function() return en.get_transport_line(line_index) end)
+      if not (ok and tl) then break end
+      local okc, contents = pcall(function() return tl.get_contents() end)
+      if okc and contents then
+        for _, st in pairs(contents) do
+          if st and st.name then
+            out[st.name] = (out[st.name] or 0) + (st.count or 1)
+          end
+        end
+      end
+    end
+  elseif et == "inserter" then
+    local okh, hs = pcall(function() return en.held_stack end)
+    if okh and hs then
+      local okn, name = pcall(function() return hs.name end)
+      local okc, count = pcall(function() return hs.count end)
+      if okn and name then
+        out[name] = (out[name] or 0) + ((okc and count) or 1)
+      end
+    end
+  end
+  return out
+end
+
 -- Recycle a deconstruction-marked entity into the `recycle` table. Handles:
 --   * item-entity (on-ground item): yields its stack item, count = stack.count
 --   * environment entities (tree/fish/rock): their mineable products classified
 --     as "items" (expected quantity per product, rounded)
+--   * transport belts: items currently travelling on the belt (as "items")
+--   * inserters: the item currently held in hand (as "items")
 --   * normal buildings: yield the building item (as "entity") + stored contents /
 --     modules (as "items")
 local function recycle_entity_contents(en, include_entities, include_items, recycle)
@@ -151,6 +189,12 @@ local function recycle_entity_contents(en, include_entities, include_items, recy
           recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
         end
       end
+    end
+    -- Items travelling on a deconstruction-marked transport belt, and the item
+    -- held in a deconstruction-marked inserter's hand (as "items"). Neither is
+    -- stored in a regular inventory, so they are read via extra_carry_items.
+    for name, n in pairs(extra_carry_items(en)) do
+      recycle[name] = (recycle[name] or 0) + n
     end
   end
 end
@@ -784,6 +828,11 @@ local function target_stock_fingerprint(target)
         parts[#parts+1] = tostring(st.name) .. ":" .. tostring(st.count or 1)
       end
     end
+  end
+  -- Belt cargo and inserter held items are not in inventories; include them so
+  -- the poll detects when construction robots remove them during deconstruction.
+  for name, n in pairs(extra_carry_items(target)) do
+    parts[#parts+1] = tostring(name) .. ":" .. tostring(n)
   end
   table.sort(parts)
   return table.concat(parts, ";")

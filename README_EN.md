@@ -100,12 +100,14 @@ The scan maintains two count tables at once:
 
 ## Item requests (item-request-proxy and container contents)
 
-The "items" category covers four sources:
+The "items" category covers six sources:
 
 - **item-request-proxy**: This is a special kind of request: vanilla does not expose its creation, so the mod fills that gap with events. Via the creation effect in data-updates.lua, the script is notified every time a temporary request entity appears, tracks it event-driven, and cleans up when it is removed/destroyed. "Supply" reads the items it requests to deliver; "recycling" reads its removal plan, using the actual stock in its target container as the recycling quantity.
 - **Contents of a deconstruction-marked entity**: when an entity is marked for deconstruction, the items/modules already inside it are classified under the "items" category as recycling (not the "entities" category), and its temporary item requests are voided to avoid double-counting.
 - **Environment entities (trees/fish/rocks...)**: these have no placeable item (no `items_to_place_this`); deconstructing them yields their mineable products. Those products are classified under the "items" category as recycling (not the "entities" category), with quantity computed as the expected amount (amount × probability) per product, rounded to the nearest integer — e.g. tree → wood, fish → raw-fish.
 - **On-ground items (item-on-ground)**: loose items on the ground (e.g. dumped iron plates) are classified under the "items" category by their item name × count, e.g. iron plates ×5 → iron-plate 5.
+- **Items on a belt**: items currently travelling on a deconstruction-marked belt (including underground belts and splitters) are classified under the "items" category as recycling.
+- **Inserter held item**: the item currently held by a deconstruction-marked inserter is classified under the "items" category as recycling.
 
 ## Event-driven updates
 
