@@ -593,8 +593,26 @@ end
 
 -- ---------------------------------------------------------------------------
 -- Write counts into the reader's control-behavior slots (vanilla item signals).
+-- To avoid redundant circuit writes on periodic rescans, only rewrite the slots
+-- when the signal set actually changed since the last write.
 -- ---------------------------------------------------------------------------
+local function counts_fingerprint(counts)
+  local parts = {}
+  for item, count in pairs(counts) do
+    parts[#parts+1] = tostring(item) .. ":" .. tostring(count)
+  end
+  table.sort(parts)
+  return table.concat(parts, ";")
+end
+
 local function write_outputs(reader, counts)
+  local unit = reader.unit_number
+  if unit then
+    local fp = counts_fingerprint(counts)
+    storage.out_fp = storage.out_fp or {}
+    if storage.out_fp[unit] == fp then return end -- unchanged
+    storage.out_fp[unit] = fp
+  end
   local cb = reader.get_or_create_control_behavior()
   if not cb then return end
   local section = cb.get_section(1)
@@ -738,7 +756,9 @@ local function on_irp_created(event)
       storage.irp_snapshots[unit] = {
         surface_index = e.surface.index,
         fingerprint = irp_fingerprint(e),
-        stock = target_stock_fingerprint(e.proxy_target)
+        stock = target_stock_fingerprint(e.proxy_target),
+        pos_x = e.position and e.position.x,
+        pos_y = e.position and e.position.y,
       }
     end
   end
@@ -758,7 +778,9 @@ local function sync_irp_snapshots()
         storage.irp_snapshots[g.unit_number] = {
           surface_index = surface.index,
           fingerprint = irp_fingerprint(g),
-          stock = target_stock_fingerprint(g.proxy_target)
+          stock = target_stock_fingerprint(g.proxy_target),
+          pos_x = g.position and g.position.x,
+          pos_y = g.position and g.position.y,
         }
       end
     end
@@ -1004,9 +1026,16 @@ local function poll_irp_updates()
       if irp and irp.valid then
         local fp = irp_fingerprint(irp)
         local stock = target_stock_fingerprint(irp.proxy_target)
-        if fp ~= data.fingerprint or stock ~= data.stock then
+        -- A moving request target (e.g. a tank/spidertron) carries its IRP with it;
+        -- its position changes as it moves in/out of the scan area even though the
+        -- request items are unchanged. Detect that so the reader re-scans.
+        local moved = irp.position
+          and (irp.position.x ~= data.pos_x or irp.position.y ~= data.pos_y)
+        if fp ~= data.fingerprint or stock ~= data.stock or moved then
           data.fingerprint = fp
           data.stock = stock
+          data.pos_x = irp.position and irp.position.x
+          data.pos_y = irp.position and irp.position.y
           mark_dirty()
         end
       else
@@ -1060,8 +1089,6 @@ local function on_tick()
     storage.dirty = nil
     update()
     refresh_all_open_gui() -- reflect the just-updated counts immediately
-  elseif game.tick % 30 == 0 then
-    refresh_all_open_gui() -- periodic real-time refresh of open panels
   end
 end
 
