@@ -342,17 +342,26 @@ local function scan_irp(surface, area, supply, recycle, visited)
         end
       end
       -- Recycle: removal plan. Each plan names an item (id.name); the quantity
-      -- is the current stock of that item in the target entity's inventories.
+      -- is the current stock of that item in the target entity's inventories
+      -- (container inventories AND module slots — e.g. modules being recycled).
       local removal = g.removal_plan
       if removal and next(removal) then
         local target = g.proxy_target
-        -- Precompute target inventory item totals (name -> total).
+        -- Precompute target item totals across container inventories AND modules.
         local stock = {}
         if target and target.valid then
           for inv_index = 1, 40 do
             local tinv = target.get_inventory(inv_index)
             if not tinv then break end
             for _, st in pairs(tinv.get_contents()) do
+              if st and st.name then
+                stock[st.name] = (stock[st.name] or 0) + (st.count or 1)
+              end
+            end
+          end
+          local minv = target.get_module_inventory()
+          if minv then
+            for _, st in pairs(minv.get_contents()) do
               if st and st.name then
                 stock[st.name] = (stock[st.name] or 0) + (st.count or 1)
               end
