@@ -2,8 +2,8 @@
 --
 -- Adds a custom constant-combinator style entity "ghost-reader" (虚影读取器).
 -- It reads every ghost inside the construction range of the logistics network it
--- is part of (entity ghosts + tile ghosts + upgrade requests + temporary item
--- requests) and outputs, as per-item signals, the count of each, using the
+-- is part of (entity ghosts + tile ghosts + upgrade requests + item requests)
+-- and outputs, as per-item signals, the count of each, using the
 -- constant-combinator control behavior's section slots. Wiring it into a circuit
 -- network makes those counts readable.
 

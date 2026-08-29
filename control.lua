@@ -1,8 +1,8 @@
 -- ghost-reader / control.lua
 --
 -- Ghost Reader (虚影读取器) — a constant-combinator style entity with a custom
--- GUI panel. It counts ghosts (entity + tile + upgrade) plus temporary item
--- requests (item-request-proxy) and outputs the per-item counts as vanilla item
+-- GUI panel. It counts ghosts (entity + tile + upgrade) plus item requests
+-- (item-request-proxy) and outputs the per-item counts as vanilla item
 -- signals via its control-behavior slots.
 --
 -- Two scan-range modes:
@@ -10,12 +10,12 @@
 --   * Network mode  : scans ghosts inside the reader's logistics-network
 --                     construction area — the union (not the bounding box) of
 --                     every square construction area of the roboports in the
---                     network the reader belongs to. IRPs (temporary item
---                     requests) are served by construction robots, so they use
---                     the same construction area.
+--                     network the reader belongs to. IRPs (item requests) are
+--                     served by construction robots, so they use the same
+--                     construction area.
 --
--- The custom GUI shows a scan-range mode selector, a filter (all / buildings /
--- tiles / upgrades / temporary item requests), a live status (current surface
+-- The custom GUI shows a scan-range mode selector, a filter (all / entities /
+-- tiles / upgrades / items), a live status (current surface
 -- 【新地星】 or current network 【网络#7】), and the per-item signal counts. It
 -- refreshes in real time and has a close button.
 --
@@ -29,12 +29,12 @@ local MODE_SURFACE = "surface"
 local MODE_NETWORK = "network"
 local DEFAULT_MODE = MODE_NETWORK
 
-local FILTER_ALL       = "all"
-local FILTER_BUILDINGS = "buildings"
-local FILTER_TILES     = "tiles"
-local FILTER_UPGRADES  = "upgrades"
-local FILTER_IRP       = "irp"       -- 临时物品请求 (item-request-proxy) only
-local DEFAULT_FILTER   = FILTER_ALL
+local FILTER_ALL     = "all"
+local FILTER_ENTITY  = "entity"
+local FILTER_TILES   = "tiles"
+local FILTER_UPGRADES = "upgrades"
+local FILTER_ITEMS   = "items"
+local DEFAULT_FILTER = FILTER_ALL
 
 -- Quantity mode: how supply and recycle counts are combined.
 local QTY_NET     = "net"      -- 供给 - 回收 (net shortage, may be negative)
@@ -155,12 +155,13 @@ end
 -- into its own table so the quantity mode can combine them later.
 -- ---------------------------------------------------------------------------
 local function scan_area(surface, area, supply, recycle, visited, filter)
-  local include_buildings = (filter == FILTER_ALL or filter == FILTER_BUILDINGS)
+  local include_entities  = (filter == FILTER_ALL or filter == FILTER_ENTITY)
   local include_tiles     = (filter == FILTER_ALL or filter == FILTER_TILES)
   local include_upgrades  = (filter == FILTER_ALL or filter == FILTER_UPGRADES)
+  local include_items     = (filter == FILTER_ALL or filter == FILTER_ITEMS)
 
   -- --- Supply: entity ghosts (build requests) ---
-  if include_buildings then
+  if include_entities then
     local ghosts = surface.find_entities_filtered{area = area, type = "entity-ghost"}
     for _, g in ipairs(ghosts) do
       if g.valid and center_in_area(g.position, area) then
@@ -215,12 +216,12 @@ local function scan_area(surface, area, supply, recycle, visited, filter)
     end
   end
 
-  -- --- Recycle: buildings marked for deconstruction (red deconstruction planner).
-  -- `to_be_deconstructed` also matches deconstructible-tile-proxy; exclude those
-  -- (they are handled separately below). Note: `type` filter matches specific
-  -- prototype types (furnace, mining-drill, ...), not a generic "entity", so we
-  -- cannot use type="entity"; instead skip tile-proxies by name/type in the loop.
-  if include_buildings then
+  -- --- Recycle: entities marked for deconstruction (red deconstruction planner).
+  -- The entity itself is recycled as an "entity" (buildings); any items/modules
+  -- stored inside it are recycled as "items" (the former "temporary item
+  -- requests"). `to_be_deconstructed` also matches deconstructible-tile-proxy;
+  -- those are handled separately below (tiles).
+  if include_entities or include_items then
     local deco = surface.find_entities_filtered{area = area, to_be_deconstructed = true}
     for _, en in ipairs(deco) do
       if en.type ~= "deconstructible-tile-proxy" and en.valid and center_in_area(en.position, area) then
@@ -229,25 +230,28 @@ local function scan_area(surface, area, supply, recycle, visited, filter)
           if visited[u] then goto skip_deco end
           visited[u] = true
         end
-        -- Recycle the building itself.
-        local item = item_for_entity(en.name)
-        if item then recycle[item] = (recycle[item] or 0) + 1 end
-        -- Recover stored contents: container inventories AND module slots
-        -- (assembling machines, labs, etc. hold modules that are recovered too).
-        for inv_index = 1, 40 do
-          local tinv = en.get_inventory(inv_index)
-          if not tinv then break end
-          for _, st in pairs(tinv.get_contents()) do
-            if st and st.name then
-              recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+        -- Recycle the entity itself (as an "entity").
+        if include_entities then
+          local item = item_for_entity(en.name)
+          if item then recycle[item] = (recycle[item] or 0) + 1 end
+        end
+        -- Recover stored items/modules (as "items").
+        if include_items then
+          for inv_index = 1, 40 do
+            local tinv = en.get_inventory(inv_index)
+            if not tinv then break end
+            for _, st in pairs(tinv.get_contents()) do
+              if st and st.name then
+                recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+              end
             end
           end
-        end
-        local minv = en.get_module_inventory()
-        if minv then
-          for _, st in pairs(minv.get_contents()) do
-            if st and st.name then
-              recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+          local minv = en.get_module_inventory()
+          if minv then
+            for _, st in pairs(minv.get_contents()) do
+              if st and st.name then
+                recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+              end
             end
           end
         end
@@ -361,7 +365,7 @@ local function get_counts_network(reader, filter)
         if crad then
           local c_area = {{ppos.x - crad, ppos.y - crad}, {ppos.x + crad, ppos.y + crad}}
           scan_area(reader.surface, c_area, supply, recycle, visited, filter)
-          if filter == FILTER_ALL or filter == FILTER_IRP then
+          if filter == FILTER_ALL or filter == FILTER_ITEMS then
             scan_irp(reader.surface, c_area, supply, recycle, visited)
           end
         end
@@ -377,7 +381,7 @@ local function get_dual_counts(reader)
   if get_mode(reader.unit_number) == MODE_SURFACE then
     local supply, recycle, visited = {}, {}, {}
     scan_area(reader.surface, nil, supply, recycle, visited, filter)
-    if filter == FILTER_ALL or filter == FILTER_IRP then
+    if filter == FILTER_ALL or filter == FILTER_ITEMS then
       scan_irp(reader.surface, nil, supply, recycle, visited)
     end
     return {supply = supply, recycle = recycle}
@@ -809,9 +813,9 @@ local function build_gui(player, reader)
   local filter_pad = filter_flow.add{type = "empty-widget"}
   filter_pad.style.horizontally_stretchable = true
   local filter_dd = filter_flow.add{type = "drop-down", name = GUI_FILTER,
-    items = {{"gr-gui.filter-all"}, {"gr-gui.filter-buildings"}, {"gr-gui.filter-tiles"}, {"gr-gui.filter-upgrades"}, {"gr-gui.filter-irp"}},
+    items = {{"gr-gui.filter-all"}, {"gr-gui.filter-entity"}, {"gr-gui.filter-tiles"}, {"gr-gui.filter-upgrades"}, {"gr-gui.filter-items"}},
     selected_index = (filter == FILTER_ALL) and 1
-      or (filter == FILTER_BUILDINGS) and 2
+      or (filter == FILTER_ENTITY) and 2
       or (filter == FILTER_TILES) and 3
       or (filter == FILTER_UPGRADES) and 4
       or 5}
@@ -912,7 +916,7 @@ local function on_gui_selection_state_changed(event)
   if e.name == GUI_MODE then
     set_mode(unit, (e.selected_index == 1) and MODE_SURFACE or MODE_NETWORK)
   elseif e.name == GUI_FILTER then
-    local filters = {FILTER_ALL, FILTER_BUILDINGS, FILTER_TILES, FILTER_UPGRADES, FILTER_IRP}
+    local filters = {FILTER_ALL, FILTER_ENTITY, FILTER_TILES, FILTER_UPGRADES, FILTER_ITEMS}
     set_filter(unit, filters[e.selected_index] or FILTER_ALL)
   elseif e.name == GUI_QTY then
     local qtys = {QTY_NET, QTY_SUPPLY, QTY_RECYCLE}
