@@ -260,18 +260,24 @@ local function scan_area(surface, area, supply, recycle, visited, filter)
           local item = item_for_entity(en.name)
           if item then recycle[item] = (recycle[item] or 0) + 1 end
         end
-        -- Recover stored items/modules (as "items").
+        -- Recover stored items/modules (as "items"). For beacon-like entities the
+        -- module inventory can ALSO be reachable via get_inventory(n); count each
+        -- item once by skipping the module inventory in the get_inventory loop.
+        -- Inventory indices are NOT contiguous (e.g. an assembling machine exposes
+        -- 2,3,4,8), so skip nil entries instead of breaking the loop.
         if include_items then
+          local minv = en.get_module_inventory()
           for inv_index = 1, 40 do
             local tinv = en.get_inventory(inv_index)
-            if not tinv then break end
+            if not tinv then goto skip_inv_done end
+            if minv and tinv == minv then goto skip_inv_done end
             for _, st in pairs(tinv.get_contents()) do
               if st and st.name then
                 recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
               end
             end
+            ::skip_inv_done::
           end
-          local minv = en.get_module_inventory()
           if minv then
             for _, st in pairs(minv.get_contents()) do
               if st and st.name then
@@ -348,18 +354,23 @@ local function scan_irp(surface, area, supply, recycle, visited)
       if removal and next(removal) then
         local target = g.proxy_target
         -- Precompute target item totals across container inventories AND modules.
+        -- Skip the module inventory in the get_inventory loop (beacon-like entities
+        -- expose their modules via both), then add it once separately. Inventory
+        -- indices are not contiguous, so skip nil entries rather than break.
         local stock = {}
         if target and target.valid then
+          local minv = target.get_module_inventory()
           for inv_index = 1, 40 do
             local tinv = target.get_inventory(inv_index)
-            if not tinv then break end
+            if not tinv then goto skip_irp_inv end
+            if minv and tinv == minv then goto skip_irp_inv end
             for _, st in pairs(tinv.get_contents()) do
               if st and st.name then
                 stock[st.name] = (stock[st.name] or 0) + (st.count or 1)
               end
             end
+            ::skip_irp_inv::
           end
-          local minv = target.get_module_inventory()
           if minv then
             for _, st in pairs(minv.get_contents()) do
               if st and st.name then
@@ -692,16 +703,19 @@ end
 local function target_stock_fingerprint(target)
   if not target or not target.valid then return "" end
   local parts = {}
+  local minv = target.get_module_inventory()
+  -- Inventory indices are not contiguous; skip nil entries rather than break.
   for inv_index = 1, 40 do
     local tinv = target.get_inventory(inv_index)
-    if not tinv then break end
+    if not tinv then goto skip_inv end
+    if minv and tinv == minv then goto skip_inv end -- module inv counted once below
     for _, st in pairs(tinv.get_contents()) do
       if st and st.name then
         parts[#parts+1] = tostring(st.name) .. ":" .. tostring(st.count or 1)
       end
     end
+    ::skip_inv::
   end
-  local minv = target.get_module_inventory()
   if minv then
     for _, st in pairs(minv.get_contents()) do
       if st and st.name then
