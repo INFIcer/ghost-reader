@@ -1,6 +1,6 @@
 # Ghost Reader
 
-**Version 1.1.5** · Requires Factorio 2.1 (including Space Age)
+**Version 1.1.6** · Requires Factorio 2.1 (including Space Age)
 
 In vanilla Factorio, the tasks of construction robots cannot be read as circuit signals, yet this is crucial for automating construction. This mod focuses on solving that. It adds a new entity that reads the ghost requests within the whole surface or its logistics network and outputs them as circuit signals, fully configurable via a GUI. It supports adjusting the filter mode (entities | tiles | upgrades | items) and the quantity mode (supply requests | recycling requests).
 
@@ -19,7 +19,7 @@ It reads four kinds of requests and tracks them in two directions — **supply**
 | Entities | Ghost of an entity to be built | Entity marked for deconstruction |
 | Tiles | Ghost of a tile to be placed | Tile marked for deconstruction |
 | Upgrades | The upgraded target entity | The original entity replaced by the upgrade |
-| Items | Requested items to deliver | Items already inside a deconstructed entity (including modules), storage-slot recycling requests (remove items) |
+| Items | Requested items to deliver | Items already inside a deconstructed entity (including modules), storage-slot recycling requests (remove items), recycling products of environment entities (trees/fish/rocks...), on-ground items |
 
 > **About "Items"**: here, "items" refers to item requests produced when you perform a **ghost operation on an entity's storage slots** (set directly in remote view), which are served by **construction robots**. It does **not** refer to the item-logistics requests served by logistics robots.
 
@@ -100,10 +100,12 @@ The scan maintains two count tables at once:
 
 ## Item requests (item-request-proxy and container contents)
 
-The "items" category covers two sources:
+The "items" category covers four sources:
 
 - **item-request-proxy**: This is a special kind of request: vanilla does not expose its creation, so the mod fills that gap with events. Via the creation effect in data-updates.lua, the script is notified every time a temporary request entity appears, tracks it event-driven, and cleans up when it is removed/destroyed. "Supply" reads the items it requests to deliver; "recycling" reads its removal plan, using the actual stock in its target container as the recycling quantity.
 - **Contents of a deconstruction-marked entity**: when an entity is marked for deconstruction, the items/modules already inside it are classified under the "items" category as recycling (not the "entities" category), and its temporary item requests are voided to avoid double-counting.
+- **Environment entities (trees/fish/rocks...)**: these have no placeable item (no `items_to_place_this`); deconstructing them yields their mineable products. Those products are classified under the "items" category as recycling (not the "entities" category), with quantity computed as the expected amount (amount × probability) per product, rounded to the nearest integer — e.g. tree → wood, fish → raw-fish.
+- **On-ground items (item-on-ground)**: loose items on the ground (e.g. dumped iron plates) are classified under the "items" category by their item name × count, e.g. iron plates ×5 → iron-plate 5.
 
 ## Event-driven updates
 
@@ -118,7 +120,7 @@ The mod prefers event-driven updates over per-frame polling:
 
 ```
 ghost-reader/
-├── info.json            # Mod metadata (name=ghost-reader, version=1.1.5)
+├── info.json            # Mod metadata (name=ghost-reader, version=1.1.6)
 ├── data.lua             # Entity/item/recipe/technology + sprite redirect
 ├── data-updates.lua     # Creation effect for reading item requests
 ├── control.lua          # Scanning, two-way counting, signal output, GUI, events

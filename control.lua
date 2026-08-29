@@ -66,6 +66,95 @@ local function item_for_tile(name)
   end
 end
 
+-- Expected mineable yields for environment entities (trees, fish, rocks, ...).
+-- These have no `items_to_place_this`, but their mineable_properties.products
+-- tell us what deconstructing them yields (e.g. tree -> wood, fish -> raw-fish).
+-- We consider ALL products and return, per item, the EXPECTED quantity
+-- (amount * probability), rounded to the nearest integer.
+local function mineable_products(name)
+  local p = prototypes.entity[name]
+  if not p then return nil end
+  local ok, mp = pcall(function() return p.mineable_properties end)
+  if not (ok and mp and mp.products) then return nil end
+  local out = {}
+  for _, pr in ipairs(mp.products) do
+    if pr and pr.name then
+      local prob = pr.probability
+      if prob == nil then prob = 1 end -- nil means guaranteed (100%)
+      if prob ~= 0 then
+        local amount = pr.amount
+        if not amount and pr.amount_min and pr.amount_max then
+          amount = (pr.amount_min + pr.amount_max) / 2
+        end
+        amount = amount or 1
+        local expected = amount * prob
+        -- Round half up to the nearest integer.
+        local qty = math.floor(expected + 0.5)
+        if qty < 1 then qty = 1 end -- always expect at least one of a possible product
+        out[pr.name] = (out[pr.name] or 0) + qty
+      end
+    end
+  end
+  return out
+end
+
+-- Recycle a deconstruction-marked entity into the `recycle` table. Handles:
+--   * item-entity (on-ground item): yields its stack item, count = stack.count
+--   * environment entities (tree/fish/rock): their mineable products classified
+--     as "items" (expected quantity per product, rounded)
+--   * normal buildings: yield the building item (as "entity") + stored contents /
+--     modules (as "items")
+local function recycle_entity_contents(en, include_entities, include_items, recycle)
+  local et = en.type
+  -- On-ground item: recycle its item stack as "items".
+  if et == "item-entity" then
+    if include_items and en.stack then
+      local n = en.stack.name
+      local c = en.stack.count or 1
+      if n then recycle[n] = (recycle[n] or 0) + c end
+    end
+    return
+  end
+  -- Environment entities with no placeable item: their mineable products are
+  -- classified as "items" (expected quantity per product, rounded).
+  if include_items and not item_for_entity(en.name) then
+    local prods = mineable_products(en.name)
+    if prods then
+      for prod, n in pairs(prods) do
+        recycle[prod] = (recycle[prod] or 0) + n
+      end
+      return
+    end
+  end
+  -- Normal building: recycle the building itself as "entity".
+  if include_entities then
+    local item = item_for_entity(en.name)
+    if item then recycle[item] = (recycle[item] or 0) + 1 end
+  end
+  -- Stored items/modules as "items" (skip the module inventory duplicates).
+  if include_items then
+    local minv = en.get_module_inventory()
+    for inv_index = 1, 40 do
+      local tinv = en.get_inventory(inv_index)
+      if not tinv then goto skip_recycle_inv end
+      if minv and tinv == minv then goto skip_recycle_inv end
+      for _, st in pairs(tinv.get_contents()) do
+        if st and st.name then
+          recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+        end
+      end
+      ::skip_recycle_inv::
+    end
+    if minv then
+      for _, st in pairs(minv.get_contents()) do
+        if st and st.name then
+          recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
+        end
+      end
+    end
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- Reader mode (persisted in storage)
 -- ---------------------------------------------------------------------------
@@ -255,37 +344,10 @@ local function scan_area(surface, area, supply, recycle, visited, filter)
           if visited[u] then goto skip_deco end
           visited[u] = true
         end
-        -- Recycle the entity itself (as an "entity").
-        if include_entities then
-          local item = item_for_entity(en.name)
-          if item then recycle[item] = (recycle[item] or 0) + 1 end
-        end
-        -- Recover stored items/modules (as "items"). For beacon-like entities the
-        -- module inventory can ALSO be reachable via get_inventory(n); count each
-        -- item once by skipping the module inventory in the get_inventory loop.
-        -- Inventory indices are NOT contiguous (e.g. an assembling machine exposes
-        -- 2,3,4,8), so skip nil entries instead of breaking the loop.
-        if include_items then
-          local minv = en.get_module_inventory()
-          for inv_index = 1, 40 do
-            local tinv = en.get_inventory(inv_index)
-            if not tinv then goto skip_inv_done end
-            if minv and tinv == minv then goto skip_inv_done end
-            for _, st in pairs(tinv.get_contents()) do
-              if st and st.name then
-                recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
-              end
-            end
-            ::skip_inv_done::
-          end
-          if minv then
-            for _, st in pairs(minv.get_contents()) do
-              if st and st.name then
-                recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
-              end
-            end
-          end
-        end
+        -- Recycle this deconstruction-marked entity (entity itself as "entity",
+        -- stored contents/modules as "items"; also covers on-ground items and
+        -- environment entities like trees/fish/rocks).
+        recycle_entity_contents(en, include_entities, include_items, recycle)
         ::skip_deco::
       end
     end
