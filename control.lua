@@ -805,6 +805,112 @@ local function on_entity_built(event)
   request_update()
 end
 
+-- ---------------------------------------------------------------------------
+-- Block settings copy-paste between the reader and a vanilla constant-combinator.
+-- Both share the "constant-combinator" type, so the game would otherwise let a
+-- player Shift+copy a reader onto a combinator (clearing the combinator's own
+-- signals) or copy a combinator onto a reader. To keep the two fully separate we
+-- do two things:
+--   * on_pre_entity_settings_pasted (fires BEFORE the native paste): snapshot the
+--     destination's full control behavior and try to clear entity_copy_source so
+--     the native paste is cancelled.
+--   * on_entity_settings_pasted (fires AFTER the native paste): if a cross-type
+--     paste still went through, restore the destination's original control
+--     behavior from the snapshot.
+-- ---------------------------------------------------------------------------
+local VANILLA_COMBINATOR = "constant-combinator"
+
+-- Is this a reader<->vanilla-combinator settings paste (either direction)?
+-- Handles both real entities and ghosts: a ghost's inner entity is its ghost_name.
+local function is_reader_kind(en)
+  return en.name == READER or (en.type == "entity-ghost" and en.ghost_name == READER)
+end
+
+local function is_vanilla_kind(en)
+  return en.name == VANILLA_COMBINATOR or (en.type == "entity-ghost" and en.ghost_name == VANILLA_COMBINATOR)
+end
+
+local function is_cross_type_paste(source, destination)
+  local src_reader = is_reader_kind(source)
+  local dst_reader = is_reader_kind(destination)
+  local src_vanilla = is_vanilla_kind(source)
+  local dst_vanilla = is_vanilla_kind(destination)
+  return (src_reader and dst_vanilla) or (src_vanilla and dst_reader)
+end
+
+-- Snapshot a combinator's full control behavior (all sections, all slots) so it
+-- can be restored after an unwanted paste. Returns nil if not snapshot-able.
+local function snapshot_control_behavior(entity)
+  local ok_cb, cb = pcall(function() return entity.get_or_create_control_behavior() end)
+  if not (ok_cb and cb) then return nil end
+  local sections = {}
+  local count = cb.sections_count
+  for s = 1, count do
+    local ok_sec, section = pcall(function() return cb.get_section(s) end)
+    if ok_sec and section then
+      local slots = {}
+      for i = 1, MAX_SLOTS do
+        local ok_slot, slot = pcall(function() return section.get_slot(i) end)
+        if ok_slot and slot and slot.value then
+          slots[i] = {
+            value = slot.value,
+            min = slot.min,
+            max = slot.max,
+          }
+        end
+      end
+      sections[s] = { slots = slots }
+    end
+  end
+  if #sections == 0 then return nil end
+  return sections
+end
+
+-- Restore a combinator's control behavior from a snapshot produced above.
+local function restore_control_behavior(entity, sections)
+  if not (entity and entity.valid and sections) then return end
+  local ok_cb, cb = pcall(function() return entity.get_or_create_control_behavior() end)
+  if not (ok_cb and cb) then return end
+  for s, data in ipairs(sections) do
+    local ok_sec, section = pcall(function() return cb.get_section(s) end)
+    if not (ok_sec and section) then
+      ok_sec, section = pcall(function() return cb.add_section("") end)
+    end
+    if ok_sec and section then
+      section.filters = {}
+      for i, slot in pairs(data.slots or {}) do
+        pcall(function()
+          section.set_slot(i, {
+            value = slot.value,
+            min = slot.min,
+            max = slot.max,
+          })
+        end)
+      end
+    end
+  end
+end
+
+local function on_pre_settings_pasted(event)
+  local source = event.source
+  local destination = event.destination
+  if not (source and source.valid and destination and destination.valid) then return end
+  if is_cross_type_paste(source, destination) then
+    log("ghost-reader: blocking settings paste reader<->vanilla combinator (src="..tostring(source.name).." dst="..tostring(destination.name)..")")
+    -- Snapshot the destination so we can restore it if the native paste still happens.
+    local snapshot = snapshot_control_behavior(destination)
+    if snapshot and destination.unit_number then
+      storage.paste_undo = storage.paste_undo or {}
+      storage.paste_undo[destination.unit_number] = snapshot
+    end
+    -- Best effort: cancel the native paste.
+    local player = event.player_index and game.get_player(event.player_index)
+    if player then
+      player.entity_copy_source = nil
+    end
+  end
+end
+
 -- Copy/paste of entity settings: when a player copies a configured reader and
 -- pastes it onto a reader ghost/entity (or copies its settings via shift+click),
 -- inherit the source reader's mode/filter/qty. The event carries the copied-from
@@ -813,10 +919,17 @@ local function on_settings_pasted(event)
   local source = event.source
   local target = event.destination
   if not (source and source.valid and target and target.valid) then return end
-  local is_reader = function(en)
-    return en.name == READER or (en.type == "entity-ghost" and en.ghost_name == READER)
+  -- If this was a reader<->vanilla-combinator paste, undo it (restore the target).
+  if is_cross_type_paste(source, target) then
+    log("ghost-reader: undoing reader<->vanilla combinator settings paste")
+    if target.unit_number and storage.paste_undo and storage.paste_undo[target.unit_number] then
+      restore_control_behavior(target, storage.paste_undo[target.unit_number])
+      storage.paste_undo[target.unit_number] = nil
+    end
+    return
   end
-  if not is_reader(source) or not is_reader(target) then return end
+  -- Otherwise: reader->reader (or reader ghost) inherits config.
+  if not is_reader_kind(source) or not is_reader_kind(target) then return end
   -- Read the source's config from storage (live readers store it there).
   local cfg = reader_config(source.unit_number)
   local tgt_unit = target.unit_number
@@ -1194,6 +1307,10 @@ script.on_event(defines.events.on_object_destroyed, on_object_destroyed)
 -- Copy/paste settings onto a reader (or reader ghost) inherits its config.
 if defines.events.on_entity_settings_pasted then
   script.on_event(defines.events.on_entity_settings_pasted, on_settings_pasted)
+end
+-- Block settings copy-paste between the reader and a vanilla constant-combinator.
+if defines.events.on_pre_entity_settings_pasted then
+  script.on_event(defines.events.on_pre_entity_settings_pasted, on_pre_settings_pasted)
 end
 
 -- Direct fallback for on_player_setup_blueprint: tag readers into the blueprint
