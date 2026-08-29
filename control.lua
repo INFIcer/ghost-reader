@@ -387,6 +387,16 @@ local function scan_area(surface, area, supply, recycle, visited, filter)
         if u then
           if visited[u] then goto skip_deco end
           visited[u] = true
+        else
+          -- Environment entities (trees/fish/rocks) and on-ground items have no
+          -- unit_number, so dedup by position to avoid double-counting the same
+          -- entity that falls in several overlapping roboport construction areas.
+          local pos = en.position
+          local key = pos and (pos.x .. "," .. pos.y) or nil
+          if key then
+            if visited[key] then goto skip_deco end
+            visited[key] = true
+          end
         end
         -- Recycle this deconstruction-marked entity (entity itself as "entity",
         -- stored contents/modules as "items"; also covers on-ground items and
