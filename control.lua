@@ -615,6 +615,8 @@ end
 -- ---------------------------------------------------------------------------
 -- Update pass: share scan results between readers on the same surface / network.
 -- ---------------------------------------------------------------------------
+local update_reader_tooltip -- forward declaration, defined below
+
 local function update()
   local cache = {}
   for _, surface in pairs(game.surfaces) do
@@ -634,6 +636,8 @@ local function update()
         cache[key] = counts
       end
       write_outputs(reader, counts)
+      -- Keep the hover tooltip in sync with the current settings.
+      update_reader_tooltip(reader)
     end
   end
 end
@@ -1081,6 +1085,39 @@ local function status_localised(reader)
     return {"", "【", {"gr-gui.network-prefix"}, tostring(net_id), "】"}
   end
   return {"gr-gui.status-no-network"}
+end
+
+-- ---------------------------------------------------------------------------
+-- Hover tooltip: refresh the reader's runtime tooltip fields so the info panel
+-- (right side when hovering the entity) shows the current settings without
+-- opening the GUI. Four fields: scan range mode, current range, filter, qty.
+-- set_tooltip_field APPENDS fields (same name does not replace), so we clear all
+-- runtime fields first, then re-add. Only real readers (not ghosts) get this.
+-- ---------------------------------------------------------------------------
+update_reader_tooltip = function(reader)
+  if not (reader and reader.valid and reader.name == READER) then return end
+  local unit = reader.unit_number
+  if not unit then return end
+  pcall(function()
+    reader.clear_tooltip_fields()
+    local mode = get_mode(unit)
+    local filter = get_filter(unit)
+    local qty = get_qty(unit)
+    local mode_key = (mode == MODE_SURFACE) and "gr-gui.mode-surface" or "gr-gui.mode-network"
+    local filter_key = "gr-gui.filter-" .. filter
+    local qty_key = "gr-gui.qty-" .. qty
+    local current = status_localised(reader)
+    -- name/value must be LocalisedString arrays ({key}) so the game localizes them.
+    local fields = {
+      {{"gr-tooltip.range-mode"}, {mode_key}},
+      {{"gr-tooltip.current-range"}, current},
+      {{"gr-tooltip.filter"}, {filter_key}},
+      {{"gr-tooltip.qty"}, {qty_key}},
+    }
+    for i, f in ipairs(fields) do
+      reader.set_tooltip_field{name = f[1], value = f[2], order = 50 + i}
+    end
+  end)
 end
 
 -- ---------------------------------------------------------------------------
