@@ -271,6 +271,24 @@ local function clear_mark_meta(entity)
   if key and storage[MARK_META] then storage[MARK_META][key] = nil end
 end
 
+-- 落地物品（item-entity）取消拆除的精确回滚兜底。
+-- 落地物品无 unit_number 且会漂移，位置 key 在标记与取消之间可能失效（has_rec=false），
+-- 此时若走全量重建兜底会误触发 WARN 并全量重扫该区域。落地物品的回收内容 = 其 stack，
+-- 取消时实体仍有效、stack 仍可读，故直接按当前 stack 反向生成 CHG_ITEM_RECYCLE 即可精确回滚。
+-- 返回是否有反向变更被登记。
+local function rollback_ground_item(entity)
+  if not (entity and entity.valid and entity.type == "item-entity") then return false end
+  local st = entity.stack
+  if not st or not st.valid_for_read then return false end
+  local item = st.name
+  local n = st.count
+  if not item or not n or n <= 0 then return false end
+  if not entity.position then return false end
+  local si = entity.surface.index
+  add_count_change(CHG_ITEM_RECYCLE, si, entity.position.x, entity.position.y, item, -n)
+  return true
+end
+
 -- 按 unit_number 反向扣减（实体已销毁、无法访问 entity 时用，如 on_object_destroyed）。
 -- 从元信息读 surface_index/x/y 与变更记录，生成反向变更后清除记录。
 -- 返回是否有反向变更被登记。
@@ -355,6 +373,7 @@ M.on_tile_ghost_built = on_tile_ghost_built
 M.on_decon_marked = on_decon_marked
 M.on_upgrade_marked = on_upgrade_marked
 M.rollback_entity = rollback_entity
+M.rollback_ground_item = rollback_ground_item
 M.rollback_entity_by_unit = rollback_entity_by_unit
 M.rollback_entity_by_registration = rollback_entity_by_registration
 M.clear_mark_meta = clear_mark_meta

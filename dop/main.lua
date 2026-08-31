@@ -591,6 +591,12 @@ local function on_cancel_decon(event)
   if ok then
     events_mod.clear_decon_mover(e)
     mark_pending()
+  elseif e.type == "item-entity" then
+    -- 落地物品：无 unit_number 且位置会漂移，meta 位置 key 可能在标记与取消间失效。
+    -- 直接按当前 stack 精确回滚，避免触发全量重建兜底（那会误 WARN 并全量重扫）。
+    if events_mod.rollback_ground_item(e) then
+      mark_pending()
+    end
   else
     -- 兜底：旧存档或异常情况没有元信息时，退化为按位置标脏全量重建。
     if e.position then
