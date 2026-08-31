@@ -16,6 +16,7 @@ local MODE_SURFACE = constants.MODE_SURFACE
 local MODE_NETWORK = constants.MODE_NETWORK
 local REGIONS = constants.REGIONS
 local READER_REGION = constants.READER_REGION
+local READER_BY_UNIT = constants.READER_BY_UNIT
 
 local get_mode = config.get_mode
 local region_key = regions.region_key
@@ -55,22 +56,39 @@ local function reader_region_of(reader)
   return REGION_NETWORK, net_id
 end
 
+-- 注册 unit→reader 实体映射（创建时调用，不涉及归属）。供需要实体时 O(1) 反查，
+-- 替代 find_entities_filtered。虚影 reader（entity-ghost ghost_name==READER）也注册，
+-- 以便 GUI 打开虚影时能反查到。
+local function reader_register(reader)
+  if not (reader and reader.valid and reader.unit_number) then return end
+  storage[READER_BY_UNIT] = storage[READER_BY_UNIT] or {}
+  storage[READER_BY_UNIT][reader.unit_number] = reader
+end
+
 -- 取读取器当前归属地（rtype, id）。
--- 优先用缓存 storage[READER_REGION][unit]（由 reader_region_set 在归属阶段写入），
--- 避免渲染/输出时每读取器每帧重复 network_id_at 全表面 roboport 扫描。
--- 无缓存（如尚未归属）时退回即时计算。
+-- 业务数据用 unit 作 key（稳定、可序列化、销毁清理简单），由 reader_region_set 在归属阶段
+-- 写入。无缓存时退回即时计算：优先用传入的 reader；否则查 READER_BY_UNIT 映射表拿实体。
 local function reader_region_cached(unit, reader)
   local reg = storage[READER_REGION] and storage[READER_REGION][unit]
   if reg then return reg[1], reg[2] end
+  if not reader and unit then
+    reader = storage[READER_BY_UNIT] and storage[READER_BY_UNIT][unit]
+  end
   if reader and reader.valid then
     return reader_region_of(reader)
   end
   return nil, nil
 end
 
--- 把读取器加入某归属地（更新元信息的 readers 列表 + 归属表）
-local function reader_region_set(unit, rtype, id)
+-- 把读取器加入某归属地（更新元信息的 readers 列表 + 归属表）。
+-- 业务数据用 unit 作 key；同时维护 unit→reader 实体映射表 READER_BY_UNIT（创建/归属时
+-- 两者都在，注册之），供需要实体时 O(1) 反查，避免 find。
+local function reader_region_set(reader, rtype, id)
+  if not reader then return end
+  local unit = reader.unit_number
   storage[READER_REGION] = storage[READER_REGION] or {}
+  storage[READER_BY_UNIT] = storage[READER_BY_UNIT] or {}
+  storage[READER_BY_UNIT][unit] = reader
   -- 从旧归属地移除
   local old = storage[READER_REGION][unit]
   if old then
@@ -84,9 +102,27 @@ local function reader_region_set(unit, rtype, id)
   r.readers[unit] = true
 end
 
+-- 移除读取器归属（销毁/被挖时调用）。事件提供 unit，直接删 unit 作 key 的业务数据，
+-- 并清理 unit→reader 映射表。
+local function reader_region_remove(unit)
+  if not unit then return end
+  storage[READER_BY_UNIT] = storage[READER_BY_UNIT] or {}
+  storage[READER_BY_UNIT][unit] = nil
+  storage[READER_REGION] = storage[READER_REGION] or {}
+  local reg = storage[READER_REGION][unit]
+  if reg then
+    local oldkey = region_key(reg[1], reg[2])
+    local r = storage[REGIONS] and storage[REGIONS][oldkey]
+    if r and r.readers then r.readers[unit] = nil end
+  end
+  storage[READER_REGION][unit] = nil
+end
+
 M.network_id_at = network_id_at
 M.reader_region_of = reader_region_of
+M.reader_register = reader_register
 M.reader_region_cached = reader_region_cached
 M.reader_region_set = reader_region_set
+M.reader_region_remove = reader_region_remove
 
 return M

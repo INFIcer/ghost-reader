@@ -123,7 +123,7 @@ local function on_settings_pasted(event)
   if cfg and tgt_unit then
     config.apply_config(tgt_unit, cfg)
     -- 配置变化 → 标记该读取器脏并触发重算
-    changes.mark_reader_dirty(tgt_unit)
+    changes.mark_reader_dirty(target)
     storage[constants.DIRTY_FLAG] = true
   end
 end

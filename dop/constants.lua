@@ -58,10 +58,11 @@ M.REGIONS        = "gr_dop_regions"        -- 归属地元信息表
 M.CHANGES        = "gr_dop_changes"        -- 变更列表
 M.DIRTY_READERS  = "gr_dop_dirty_readers"  -- 归属地脏的读取器列表
 M.DIRTY_FLAG     = "gr_dop_dirty"          -- 一帧统一处理开关
-M.READER_REGION  = "gr_dop_reader_region"  -- 读取器当前归属表
+M.READER_REGION  = "gr_dop_reader_region"  -- 读取器当前归属表（key=reader 实体引用）
+M.READER_BY_UNIT = "gr_dop_reader_by_unit" -- unit→reader 索引（供销毁清理定位）
 M.IRP_SNAPS      = "gr_dop_irp_snaps"      -- IRP 指纹快照
 M.IRP_POLL_PER_TICK = 8                    -- IRP 每 tick 轮询上限
-M.DECON_POLL_PER_TICK = 1                  -- 拆除移动实体每 tick 内容物轮询上限（借鉴 IRP 分批）
+M.DECON_POLL_PER_TICK = 8                  -- 拆除移动实体每 tick 内容物轮询上限（借鉴 IRP 分批）
 M.MARK_META      = "gr_dop_mark_meta"      -- 拆除/升级标记的变更元信息（供取消回滚）
 M.DECON_MOVERS   = "gr_dop_decon_movers"   -- 拆除标记的移动实体位置快照（供进出建设区域检测）
 M.DECON_POLL_INDEX = "gr_dop_decon_poll_index" -- 拆除实体轮询游标（round-robin）

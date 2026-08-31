@@ -36,6 +36,7 @@ local REGION_NETWORK = constants.REGION_NETWORK
 local QTY_NET, QTY_SUPPLY, QTY_RECYCLE = constants.QTY_NET, constants.QTY_SUPPLY, constants.QTY_RECYCLE
 local REGIONS = constants.REGIONS
 local READER_REGION = constants.READER_REGION
+local READER_BY_UNIT = constants.READER_BY_UNIT
 local DIRTY_READERS = constants.DIRTY_READERS
 local DIRTY_FLAG = constants.DIRTY_FLAG
 local IRP_SNAPS = constants.IRP_SNAPS
@@ -63,7 +64,9 @@ local hit_regions_by_point = regions.hit_regions_by_point
 local region_key = regions.region_key
 
 local reader_region_of = regions_incr.reader_region_of
+local reader_register = regions_incr.reader_register
 local reader_region_set = regions_incr.reader_region_set
+local reader_region_remove = regions_incr.reader_region_remove
 
 local irp_fingerprint = irp_mod.irp_fingerprint
 local irp_requests = irp_mod.irp_requests
@@ -123,8 +126,8 @@ local function mark_pending()
   storage[DIRTY_FLAG] = true
 end
 -- 注入 GUI 的配置变更回调
-gui.set_config_changed_hook(function(unit)
-  if unit then mark_reader_dirty(unit); mark_pending() end
+gui.set_config_changed_hook(function(reader)
+  if reader and reader.valid then mark_reader_dirty(reader); mark_pending() end
 end)
 
 -- 读档后需要重建的标志（模块级局部变量，不存 storage：on_load 禁止改 storage）
@@ -360,9 +363,12 @@ local function mark_dirty_by_topology(net_change)
   local has_shrink = next(change.shrunk or {}) ~= nil
   if not (has_expand or has_shrink) then return end
   for unit, reg in pairs(storage[READER_REGION] or {}) do
-    -- reg = { rtype, id }
+    -- reg = { rtype, id }；key 是 unit，通过 unit→reader 映射表反查实体来标脏
     if reg[1] == REGION_NETWORK then
-      mark_reader_dirty(unit)
+      local reader = storage[READER_BY_UNIT] and storage[READER_BY_UNIT][unit]
+      if reader and reader.valid then
+        mark_reader_dirty(reader)
+      end
     end
     -- surface 模式读取器：忽略
   end
@@ -509,10 +515,11 @@ local function on_built_entity(event)
   if not (e and e.valid) then return end
   if e.type == "entity-ghost" then
     if e.ghost_name == READER then
-      -- 读取器虚影：只继承配置到 ghost_cfg（供建成真实读取器时继承），
-      -- 不登记为读取器、不进入脏读取器/渲染管线（虚影无电路输出，step7 只渲染
-      -- name==READER 的真实读取器）。若登记 reader_added 会把虚影塞进 DIRTY_READERS，
-      -- on_tick step4 会对每个虚影调 find_reader 做全表面扫描 → 放置大量虚影时 O(N×全表面) 卡顿。
+      -- 读取器虚影：注册到 unit→reader 映射表（供 GUI 打开虚影时反查），不登记为
+      -- 读取器、不进入脏读取器/渲染管线（虚影无电路输出，渲染只处理 name==READER）。
+      -- 注册销毁事件，虚影销毁（建成/被挖）时由 on_destroyed 清理映射表。
+      reader_register(e)
+      pcall(function() script.register_on_object_destroyed(e) end)
       bplib_mod.apply_reader_config_from_tags(e)
       -- 不 mark_pending：虚影本身不产生任何计数/归属地变化。
     else
@@ -523,7 +530,10 @@ local function on_built_entity(event)
     events_mod.on_tile_ghost_built(e)
     mark_pending()
   elseif e.name == READER then
-    current_changes().reader_added[e.unit_number] = e.surface.index
+    -- 创建时注册 unit→reader 实体映射（供 GUI/归属反查，避免 find）
+    reader_register(e)
+    -- reader_added 存 reader 实体引用（运行时数据，不持久化），供归属阶段直接用。
+    current_changes().reader_added[e] = true
     -- 真实读取器构建：从蓝图 tags / pending_tags 继承配置
     bplib_mod.apply_reader_config_from_tags(e)
     mark_pending()
@@ -672,36 +682,25 @@ local function on_tick()
   mark_dirty_by_topology(net_change)
 
   -- 3) 新增读取器 → 标记脏
-  for unit, _ in pairs(current_changes().reader_added) do
-    mark_reader_dirty(unit)
+  for reader, _ in pairs(current_changes().reader_added) do
+    mark_reader_dirty(reader)
   end
-  -- 删除读取器：清理其归属与输出指纹
+  -- 删除读取器：清理其归属与输出指纹（经 unit→reader 索引定位 reader 引用后清理）
   for unit, _ in pairs(current_changes().reader_removed) do
-    storage[READER_REGION] = storage[READER_REGION] or {}
-    storage[READER_REGION][unit] = nil
+    reader_region_remove(unit)
     if storage.out_fp then storage.out_fp[unit] = nil end
   end
 
   -- 4) 遍历脏读取器 → 结合范围模式重新归属
-  -- 性能：一次性建 unit→reader 索引（跨表面），避免对每个脏读取器各自调 find_reader
-  -- 做全表面扫描（那会 O(N × 全表面)）。
-  local reader_by_unit = {}
-  local function build_reader_index()
-    for _, surface in pairs(game.surfaces) do
-      for _, e in ipairs(surface.find_entities_filtered{name = READER}) do
-        if e.valid and e.unit_number then reader_by_unit[e.unit_number] = e end
-      end
-    end
-  end
-  build_reader_index()
-  for unit, _ in pairs(storage[DIRTY_READERS] or {}) do
-    local reader = reader_by_unit[unit]
+  -- DIRTY_READERS 直接存 reader 实体引用（运行时数据，不持久化），消费端直接用，
+  -- 无需 unit→实体反查、无需每帧全表面 find 建 reader 索引。
+  for reader, _ in pairs(storage[DIRTY_READERS] or {}) do
     if reader and reader.valid then
       local rtype, id = reader_region_of(reader)
-      reader_region_set(unit, rtype, id)
+      reader_region_set(reader, rtype, id)
     else
-      storage[READER_REGION] = storage[READER_REGION] or {}
-      storage[READER_REGION][unit] = nil
+      -- reader 已失效（实体销毁）：无法取 unit 清理，仅清空该脏标记。
+      storage[DIRTY_READERS][reader] = nil
     end
   end
 
@@ -718,19 +717,6 @@ local function on_tick()
     end
   end
   storage.rollback_at = {}
-  -- IRP 重算（指纹变化）：在该 IRP 位置重登记供给
-  for unit, _ in pairs(storage.irp_rescan_at or {}) do
-    local data = storage[IRP_SNAPS] and storage[IRP_SNAPS][unit]
-    if data then
-      local surface = data.surface_index and game.get_surface(data.surface_index)
-      if surface then
-        for _, e in ipairs(surface.find_entities_filtered{type = "item-request-proxy"}) do
-          if e.unit_number == unit then register_irp_changes(e); break end
-        end
-      end
-    end
-  end
-  storage.irp_rescan_at = {}
 
   -- 5.5) 重建被标记的归属地计数（仅兜底路径：元信息缺失的取消操作）。
   -- 正常情况下取消拆除/升级走增量 rollback_entity，不应触发此路径；一旦触发
@@ -754,8 +740,10 @@ local function on_tick()
 
   -- 7) 幽灵读取器输出信号（每脏 tick 清一次输出缓存，同网络同配置读取器共享）
   gui.reset_output_cache()
-  for _, surface in pairs(game.surfaces) do
-    for _, reader in ipairs(surface.find_entities_filtered{name = READER}) do
+  -- 用增量维护的 unit→reader 映射表遍历所有真实 reader（O(reader 数)），
+  -- 替代每脏 tick 全表面 find 重扫。虚影 reader 不渲染（无电路输出）。
+  for _, reader in pairs(storage[READER_BY_UNIT] or {}) do
+    if reader and reader.valid and reader.name == READER then
       render_reader(reader)
     end
   end
@@ -775,9 +763,9 @@ end
 rebuild_all = function()
     storage[REGIONS] = nil
   storage[READER_REGION] = nil
+  storage[READER_BY_UNIT] = nil
   storage[DIRTY_READERS] = nil
   reset_changes()
-  storage.irp_rescan_at = {}
   storage.rollback_at = {}
   storage.region_rebuild = {}
   storage[MARK_META] = nil
@@ -798,15 +786,18 @@ rebuild_all = function()
   for _, surface in pairs(game.surfaces) do
     for _, reader in ipairs(surface.find_entities_filtered{name = READER}) do
       if reader.valid and reader.unit_number then
-        current_changes().reader_added[reader.unit_number] = surface.index
+        reader_register(reader)   -- 读档后重建 unit→reader 实体映射
+        current_changes().reader_added[reader] = true
       end
     end
   end
 
-  -- 3) 虚影（实体/地格）：登记供给
+  -- 3) 虚影（实体/地格）：登记供给；读取器虚影注册到 unit→reader 映射表（供 GUI 反查）
   for _, surface in pairs(game.surfaces) do
     for _, g in ipairs(surface.find_entities_filtered{type = "entity-ghost"}) do
-      if g.valid and g.ghost_name ~= READER then
+      if g.valid and g.ghost_name == READER then
+        reader_register(g)
+      elseif g.valid then
         events_mod.on_entity_ghost_built(g)
       end
     end

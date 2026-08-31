@@ -73,10 +73,14 @@ local function add_count_change(kind, surface_index, x, y, item, count)
   }
 end
 
--- 往 dirty 的读取器列表登记（归属地脏：该读取器需要重算归属地）
-local function mark_reader_dirty(unit)
+-- 往 dirty 的读取器列表登记（归属地脏：该读取器需要重算归属地）。
+-- DIRTY_READERS 是纯运行时数据（每帧帧末清空，不跨存档持久化），故直接存
+-- reader 实体引用而非 unit——消费端可直接使用，无需 unit→实体反查。
+-- reader 须为有效的幽灵读取器实体（或至少含 .valid/.unit_number）。
+local function mark_reader_dirty(reader)
+  if not reader then return end
   storage[DIRTY_READERS] = storage[DIRTY_READERS] or {}
-  storage[DIRTY_READERS][unit] = true
+  storage[DIRTY_READERS][reader] = true
 end
 
 M.current_changes = current_changes

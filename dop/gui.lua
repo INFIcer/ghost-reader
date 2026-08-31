@@ -22,6 +22,7 @@ local QTY_NET, QTY_SUPPLY, QTY_RECYCLE = constants.QTY_NET, constants.QTY_SUPPLY
 local GUI_FRAME, GUI_TABLE, GUI_STATUS, GUI_MODE, GUI_FILTER, GUI_QTY =
   constants.GUI_FRAME, constants.GUI_TABLE, constants.GUI_STATUS, constants.GUI_MODE, constants.GUI_FILTER, constants.GUI_QTY
 local REGIONS = constants.REGIONS
+local READER_BY_UNIT = constants.READER_BY_UNIT
 
 local get_mode = config.get_mode
 local get_filter = config.get_filter
@@ -77,14 +78,10 @@ local function rebuild_gui_table(frame, counts)
 end
 
 local function find_reader(unit)
-  for _, surface in pairs(game.surfaces) do
-    for _, e in ipairs(surface.find_entities_filtered{name = READER}) do
-      if e.unit_number == unit then return e end
-    end
-    for _, e in ipairs(surface.find_entities_filtered{type = "entity-ghost"}) do
-      if e.unit_number == unit and e.ghost_name == READER then return e end
-    end
-  end
+  -- 增量维护的 unit→reader 实体映射表（含真实 reader 与虚影 reader），O(1) 反查。
+  -- 创建/归属时注册，销毁时清理，故无需全表面 find。
+  local reader = storage[READER_BY_UNIT] and storage[READER_BY_UNIT][unit]
+  if reader and reader.valid then return reader end
   return nil
 end
 
@@ -254,7 +251,7 @@ local function on_gui_selection_state_changed(event)
     local qtys = {QTY_NET, QTY_SUPPLY, QTY_RECYCLE}
     set_qty(unit, qtys[e.selected_index] or QTY_NET)
   end
-  if on_config_changed then on_config_changed(unit) end
+  if on_config_changed then on_config_changed(reader) end
 end
 
 M.find_reader = find_reader

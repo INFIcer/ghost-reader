@@ -112,7 +112,7 @@ local function on_bplib_overlaps(event)
           if cfg then
             config.apply_config(overlapped.unit_number, cfg)
             -- 配置变化 → 标记该读取器脏并触发重算
-            changes.mark_reader_dirty(overlapped.unit_number)
+            changes.mark_reader_dirty(overlapped)
             storage[constants.DIRTY_FLAG] = true
           end
         end
@@ -168,7 +168,7 @@ local function apply_reader_config_from_tags(entity)
       storage.ghost_cfg = storage.ghost_cfg or {}
       storage.ghost_cfg[key] = cfg
     end
-    changes.mark_reader_dirty(unit)
+    changes.mark_reader_dirty(entity)
     storage[constants.DIRTY_FLAG] = true
     log("[ghost-reader][INHERIT] applied cfg to unit="..tostring(unit)
       .." key="..tostring(key).." mode="..tostring(cfg.mode).." filter="..tostring(cfg.filter)
