@@ -189,12 +189,91 @@ local function scan_port_delta(r, surface, port, old_bvh, skip)
   end
 end
 
+-- 网络合并/分裂：Factorio 无 on_logistic_network_merged/split 事件，且合并时
+-- 既有端口的 network_id 会重排而不触发 port_added/port_removed（只新增的桥接
+-- 端口触发 port_added）。故在端口增删后，额外核对所有端口的当前 network_id，
+-- 把因 id 重排而"归属错位"的端口迁移到正确的网络 region（复用 scan_port_delta
+-- 的 BVH diff 做补记/扣减），并标脏受影响的网络读取器。
+local function reconcile_ports(surface, skip)
+  if not surface then return nil end
+  -- 收集该表面所有端口当前归属
+  local port_net = {}
+  for _, e in ipairs(surface.find_entities_filtered{name = "roboport"}) do
+    if e.valid and e.unit_number then
+      local net = e.logistic_network
+      port_net[e.unit_number] = net and net.network_id or nil
+    end
+  end
+  local regions_tbl = storage[REGIONS] or {}
+  -- 第一遍：收集需要迁移的端口（unit, from_net, to_net）与已消失端口
+  local moves, removed = {}, {}
+  for key, r in pairs(regions_tbl) do
+    if r.type == REGION_NETWORK then
+      for unit, port in pairs(r.ports) do
+        local new_net = port_net[unit]
+        if new_net == nil then
+          removed[#removed + 1] = { r = r, unit = unit, port = port }
+        elseif new_net ~= r.id then
+          moves[#moves + 1] = { r = r, unit = unit, port = port, to = new_net }
+        end
+      end
+    end
+  end
+  local changed = false
+  local changed_nets = {}
+  -- 迁移端口：从旧 region 移除（扣减），加入新 region（补记）
+  for _, m in ipairs(moves) do
+    local from = m.r
+    local unit, port, to = m.unit, m.port, m.to
+    if to == nil then
+      -- 端口不再属于任何网络：仅从 from 移除（扣减）
+      local old_bvh = regions.region_get_bvh(from)
+      from.ports[unit] = nil
+      update_region_bbox(from)
+      scan_port_delta(from, surface, port, old_bvh, skip)
+      changed_nets[from.id] = true
+      changed = true
+    else
+      local to_r = ensure_region(REGION_NETWORK, to)
+      to_r.surface_index = surface.index
+      -- 1) 从 from 移除：BVH 缩小，扣减离开范围
+      local old_bvh = regions.region_get_bvh(from)
+      from.ports[unit] = nil
+      update_region_bbox(from)
+      scan_port_delta(from, surface, port, old_bvh, skip)
+      changed_nets[from.id] = true
+      -- 2) 加入 to：BVH 扩大，补记新进入范围
+      local to_old_bvh = regions.region_get_bvh(to_r)
+      to_r.ports[unit] = port
+      update_region_bbox(to_r)
+      scan_port_delta(to_r, surface, port, to_old_bvh, skip)
+      changed_nets[to] = true
+      changed = true
+    end
+  end
+  -- 已消失端口：按移除处理
+  for _, d in ipairs(removed) do
+    local old_bvh = regions.region_get_bvh(d.r)
+    d.r.ports[d.unit] = nil
+    update_region_bbox(d.r)
+    scan_port_delta(d.r, surface, d.port, old_bvh, skip)
+    changed_nets[d.r.id] = true
+    changed = true
+  end
+  if changed then
+    return changed_nets
+  end
+  return nil
+end
+
 -- 供 mark_dirty_by_topology 只标脏可能受影响的读取器，而非全部。
 local function process_region_topology_changes()
   local C = current_changes()
   storage[REGIONS] = storage[REGIONS] or {}
   local regions_tbl = storage[REGIONS]
   local expanded, shrunk = {}, {}
+  -- 端口增删涉及的表面（网络合并/分裂 id 重排时需 reconcile 核对迁移）
+  local recon_surfaces = {}
 
   -- 本次脏 tick 已登记到 count_changes 的位置：这些虚影/拆除会用"当前 bvh"由
   -- process_count_changes 权威归属，scan_port_delta 必须跳过，否则同 tick 内
@@ -226,6 +305,7 @@ local function process_region_topology_changes()
       scan_port_delta(r, surface, r.ports[port_unit], old_bvh, skip)
     end
     expanded[net_id] = true
+    if data.surface_index then recon_surfaces[data.surface_index] = true end
   end
   for port_unit, _ in pairs(C.port_removed) do
     for key, r in pairs(regions_tbl) do
@@ -241,10 +321,27 @@ local function process_region_topology_changes()
             scan_port_delta(r, surface, port, old_bvh, skip)
           end
           shrunk[r.id] = true
+          if r.surface_index then recon_surfaces[r.surface_index] = true end
         end
       end
     end
   end
+
+  -- 网络合并/分裂的 id 重排迁移：端口增删可能伴随既有端口 network_id 变化
+  -- （不触发事件）。对涉及的表面做核对迁移，并把受影响网络并入标脏集合。
+  for si, _ in pairs(recon_surfaces) do
+    local surface = game.get_surface(si)
+    if surface then
+      local changed_nets = reconcile_ports(surface, skip)
+      if changed_nets then
+        for nid, _ in pairs(changed_nets) do
+          expanded[nid] = true
+          shrunk[nid] = true
+        end
+      end
+    end
+  end
+
   return { expanded = expanded, shrunk = shrunk }
 end
 
