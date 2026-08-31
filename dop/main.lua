@@ -25,6 +25,7 @@ local point_tree = require("__ghost-reader__/dop/point_tree")
 local events_mod = require("__ghost-reader__/dop/events")
 local regions_incr = require("__ghost-reader__/dop/regions_incr")
 local irp_mod = require("__ghost-reader__/dop/irp")
+local decon_mod = require("__ghost-reader__/dop/decon")
 local gui = require("__ghost-reader__/dop/gui")
 local bplib_mod = require("__ghost-reader__/dop/bplib")
 local paste_mod = require("__ghost-reader__/dop/paste")
@@ -45,7 +46,6 @@ local CHG_ENTITY_SUPPLY = constants.CHG_ENTITY_SUPPLY
 local CHG_TILE_SUPPLY = constants.CHG_TILE_SUPPLY
 local MARK_META = constants.MARK_META
 local READER = constants.READER
-local tile_pos = constants.tile_pos
 
 local item_for_entity = items.item_for_entity
 local item_for_tile = items.item_for_tile
@@ -73,6 +73,7 @@ local apply_irp_changes = irp_mod.apply_irp_changes
 local apply_irp_removals = irp_mod.apply_irp_removals
 local poll_irp_updates = irp_mod.poll_irp_updates
 local register_irp_changes = irp_mod.register_irp_changes
+local poll_decon_movers = decon_mod.poll_decon_movers
 
 local refresh_all_open_gui = gui.refresh_all_open_gui
 local render_reader = gui.render_reader
@@ -622,7 +623,11 @@ local function on_irp_created(event)
     storage[IRP_SNAPS] = storage[IRP_SNAPS] or {}
     -- 归属位置用 proxy_target（被请求容器）的位置，与 poll 一致；容器被拖走时正确反映归属。
     local anchor = irp_anchor_position(e) or {}
+    -- 存 IRP 实体引用（借鉴 item-request-proxy-events）：轮询直接用引用读取
+    -- requests/removals/fingerprint，避免 find/get_entity_by_unit_number。引用在
+    -- storage 跨 tick 有效，失效时 irp.valid==false 即走反扣清理。
     storage[IRP_SNAPS][e.unit_number] = {
+      irp = e,
       surface_index = anchor.surface or e.surface.index,
       fingerprint = irp_fingerprint(e),
       x = anchor.x,
@@ -639,134 +644,6 @@ end
 -- =============================================================================
 -- on_tick 主循环（DOP 核心）
 -- =============================================================================
-
--- 拆除标记的移动实体位置/内容物轮询：
---   * 位置变化（列车车厢等被拖走）→ 进出建设区域，改变回收计数归属；
---   * 内容物变化（机器人拆除机械臂/传送带/容器时逐步搬走其手持物/货物/内部
---     物品与插件）→ 回收的物品计数随之减少。
--- 无原生事件，每帧对比位置与内容物指纹，变化时做增量撤销/重加。
---
--- 性能关键：早期实现"对每个快照各做一次全表面 find_entities_filtered{to_be_deconstructed}"
--- 扫描，N 个标记拆除实体 = 每帧 N 次全表面扫描 → 大量标记拆除实体时严重卡顿。
--- 现改为**每个表面每帧只扫一次**，建 unit→entity 索引，再遍历全部快照复用该索引。
--- 拆除标记的移动实体位置/内容物轮询：
---   * 位置变化（列车车厢等被拖走）→ 进出建设区域，改变回收计数归属；
---   * 内容物变化（机器人拆除机械臂/传送带/容器时逐步搬走其手持物/货物/内部
---     物品与插件）→ 回收的物品计数随之减少。
--- 无原生事件，每帧对比位置与内容物指纹，变化时做增量撤销/重加。
---
--- 性能关键（彻底与标记拆除实体总数 N 解耦）：
---   旧实现每帧 (a) 对每个表面全表面 find_entities_filtered{to_be_deconstructed} 建索引
---   (O(N)) 且 (b) pairs(snaps) 遍历全部快照 (O(N))，导致持续帧开销随 N 增长。
---   现改为 IRP 式 round-robin：每帧只处理 DECON_POLL_PER_TICK 个快照（游标轮转），
---   且按快照记录的位置做小区域 find 获取实体（O(区域)），不整表面扫描；
---   可移动实体在小区域找不到时再做一次该表面的有界兜底扫描。每帧成本 O(budget)。
--- 按 unit_number + 快照位置取被标记拆除的实体（get_entity_by_unit_number 只对带
--- "get-by-unit-number" 能力的实体有效，普通建筑/容器不可靠，故用 find）。
--- 优先在快照位置附近小区域找（覆盖静态/微动实体）；可移动实体（已移走）再全表面
--- 有界兜底。返回实体（且仍 to_be_deconstructed）或 nil。
-local function decon_entity_by_unit(unit, data)
-  if not (data and data.surface_index) then return nil end
-  local surface = game.get_surface(data.surface_index)
-  if not surface then return nil end
-  local ent = nil
-  local area = { { data.x - 1.5, data.y - 1.5 }, { data.x + 1.5, data.y + 1.5 } }
-  for _, e in ipairs(surface.find_entities_filtered{area = area, limit = 1}) do
-    if e.valid and e.unit_number == unit then ent = e; break end
-  end
-  if not ent and data.movable then
-    -- 可移动实体可能已移出小区域：全表面按 unit 有界兜底（仅可移动类型）
-    for _, e in ipairs(surface.find_entities_filtered{}) do
-      if e.valid and e.unit_number == unit then ent = e; break end
-    end
-  end
-  if ent and ent.valid and not ent.to_be_deconstructed then ent = nil end
-  if ent and ent.valid and ent.position then return ent end
-  return nil
-end
-
-local function poll_decon_movers(mark_pending)
-  local snaps = storage[DECON_MOVERS]
-  if not snaps or not next(snaps) then return end
-
-  local budget = constants.DECON_POLL_PER_TICK
-  local index_key = constants.DECON_POLL_INDEX
-
-  -- round-robin：从游标开始，用 next() 顺序取 budget 个 key（到尾绕回开头）。
-  -- 收集用局部数组，避免遍历中删除快照导致 next() 的 prev 失效。
-  local units = {}
-  local start = storage[index_key]
-  -- 游标可能指向已删除的快照（取消/移除/重建），无效则从头开始
-  if start ~= nil and snaps[start] == nil then start = nil; storage[index_key] = nil end
-  local prev = start
-  local guard = 0
-  while #units < budget do
-    guard = guard + 1
-    if guard > budget * 2 + 2 then break end   -- 防死循环（表很小或已被改）
-    local k = next(snaps, prev)
-    if k == nil then
-      if prev == nil then break end            -- 整个表已遍历完（无绕回对象）
-      prev = nil                                -- 绕回表头
-    else
-      units[#units + 1] = k
-      prev = k
-      storage[index_key] = k
-      if k == start then break end              -- 已绕回一圈
-    end
-  end
-  if #units == 0 then storage[index_key] = nil end
-
-  for _, unit in ipairs(units) do
-    local data = snaps[unit]
-    if data then
-      -- 取被标记拆除的实体（get_entity_by_unit_number 对普通建筑不可靠，封装在
-      -- decon_entity_by_unit 内：优先小区域 find，可移动实体移出再全表面兜底）。
-      local ent = decon_entity_by_unit(unit, data)
-      if ent and ent.valid and ent.position then
-        local t = tile_pos(ent.position)
-        local ot = tile_pos(data)
-        local moved = data.movable and ((t.x ~= ot.x) or (t.y ~= ot.y))
-        local old_items = data.stock or {}
-        local new_items = events_mod.content_items(ent)
-        local function fp(tbl)
-          local p = {}
-          for k, v in pairs(tbl) do p[#p + 1] = tostring(k) .. ":" .. tostring(v) end
-          table.sort(p)
-          return table.concat(p, ";")
-        end
-        local stock_changed = (fp(old_items) ~= fp(new_items))
-        log("[gr-dbg][decon] unit="..tostring(unit).." ent="..tostring(ent and ent.name or "nil")
-          .." stock_changed="..tostring(stock_changed).." old="..fp(old_items).." new="..fp(new_items))
-        if moved or stock_changed then
-          local si = ent.surface.index
-          for item, n in pairs(old_items) do
-            add_count_change(CHG_ITEM_RECYCLE, data.surface_index, data.x, data.y, item, -n)
-          end
-          for item, n in pairs(new_items) do
-            add_count_change(CHG_ITEM_RECYCLE, si, ent.position.x, ent.position.y, item, n)
-          end
-          local ent_item = item_for_entity(ent.name)
-          if ent_item then
-            add_count_change(CHG_ENTITY_RECYCLE, data.surface_index, data.x, data.y, ent_item, -1)
-            add_count_change(CHG_ENTITY_RECYCLE, si, ent.position.x, ent.position.y, ent_item, 1)
-          end
-          data.surface_index = si
-          data.x = ent.position.x
-          data.y = ent.position.y
-          data.stock = new_items
-          if unit then events_mod.meta_set_items("u:" .. tostring(unit), new_items) end
-          if moved and unit then
-            events_mod.meta_set_position("u:" .. tostring(unit), si, ent.position.x, ent.position.y)
-          end
-          if mark_pending then mark_pending() end
-        end
-      else
-        snaps[unit] = nil -- 已取消/已移除
-      end
-    end
-  end
-  if #units == 0 then storage[index_key] = nil end
-end
 
 -- 前置声明：rebuild_all 在文件后方定义，但 on_tick 需要调用它（Lua 中 local
 -- function 只在声明之后可见，故此处先声明，后面再赋值）。
@@ -962,11 +839,13 @@ rebuild_all = function()
     for _, g in ipairs(surface.find_entities_filtered{type = "item-request-proxy"}) do
       if g.valid and g.unit_number then
         pcall(function() script.register_on_object_destroyed(g) end)
+        local anchor = irp_anchor_position(g) or {}
         storage[IRP_SNAPS][g.unit_number] = {
-          surface_index = surface.index,
+          irp = g,
+          surface_index = anchor.surface or surface.index,
           fingerprint = irp_fingerprint(g),
-          x = g.position and g.position.x,
-          y = g.position and g.position.y,
+          x = anchor.x,
+          y = anchor.y,
           reqs = irp_requests(g),
           removals = irp_removals(g),
         }

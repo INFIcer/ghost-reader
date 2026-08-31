@@ -105,25 +105,6 @@ local function irp_anchor_position(irp)
   return nil
 end
 
--- 按 unit_number + 快照位置取 IRP 实体（get_entity_by_unit_number 只对带
--- "get-by-unit-number" 能力的实体有效，普通实体不可靠，故用 find 兜底）。
--- 优先在快照锚点附近小区域找（IRP 通常在代理目标位置附近）；未命中再全表面
--- 按 unit 兜底，避免实体随代理容器移动时误判为"已移除"。返回 IRP 实体或 nil。
-local function irp_by_unit(unit, data)
-  if not (data and data.surface_index) then return nil end
-  local surface = game.get_surface(data.surface_index)
-  if not surface then return nil end
-  local area = { { data.x - 2, data.y - 2 }, { data.x + 2, data.y + 2 } }
-  for _, e in ipairs(surface.find_entities_filtered{area = area, type = "item-request-proxy"}) do
-    if e.valid and e.unit_number == unit and e.type == "item-request-proxy" then return e end
-  end
-  -- 小区域未命中：全表面按 unit 兜底
-  for _, e in ipairs(surface.find_entities_filtered{type = "item-request-proxy"}) do
-    if e.valid and e.unit_number == unit and e.type == "item-request-proxy" then return e end
-  end
-  return nil
-end
-
 -- on_tick 最前：轮询少量 IRP，检测指纹变化 → 登记物品供给变更。
 -- mark_pending 由调用方（main 的 on_tick）在登记后置位。
 -- 采用"key 快照数组 + 起始索引"分批遍历：遍历中可安全删除 snaps 里的 key，
@@ -150,9 +131,9 @@ local function poll_irp_updates(mark_pending)
     storage.irp_prev_index = start
     local data = snaps[unit]
     if data then
-      -- 取 IRP 实体：unit_number + 快照位置（get_entity_by_unit_number 对普通实体不可靠，
-      -- 封装在 irp_by_unit 内，优先小区域 find、未命中再全表面按 unit 兜底）。
-      local irp = irp_by_unit(unit, data)
+      -- 直接用快照里存的 IRP 实体引用（借鉴 item-request-proxy-events），
+      -- 不 find、不 get_entity_by_unit_number。引用失效（valid=false）即走反扣清理。
+      local irp = data.irp
       if irp and irp.valid then
         local anchor = irp_anchor_position(irp)
         if anchor then

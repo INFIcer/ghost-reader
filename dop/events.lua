@@ -337,7 +337,7 @@ local function content_items(entity)
   return tbl
 end
 
--- 记录一个被标记拆除的移动实体快照（位置 + 内容物表），供 on_tick 检测
+-- 记录一个被标记拆除的移动实体快照（entity + 位置 + 内容物表），供 on_tick 检测
 -- 进出建设区域与内容物（内部物品/插件/传送带货物/机械臂手持物）变化。
 -- 仅对"移动或内容变化会影响计数归属"的实体记录：有 unit_number 且
 -- needs_decon_tracking（可能移动或携带内容物）。落地物品/环境实体/静态无内容
@@ -348,7 +348,11 @@ record_decon_mover = function(entity)
   if not items.needs_decon_tracking(entity) then return nil end
   local stock = content_items(entity)   -- 旧内容物表 { [item]=count }
   storage[DECON_MOVERS] = storage[DECON_MOVERS] or {}
+  -- 存实体引用（借鉴 item-request-proxy-events）：轮询直接用引用读取内容物，
+  -- 避免 find/get_entity_by_unit_number（后者对普通实体不可靠）。引用在 storage
+  -- 跨 tick 有效，失效时 entity.valid==false 即清理快照。
   storage[DECON_MOVERS][entity.unit_number] = {
+    entity = entity,
     surface_index = entity.surface.index,
     x = entity.position.x,
     y = entity.position.y,
