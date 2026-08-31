@@ -1,6 +1,6 @@
 # Ghost Reader
 
-**Version 1.1.7** · Requires Factorio 2.1 (including Space Age)
+**Version 1.2.0** · Requires Factorio 2.1 (including Space Age)
 
 In vanilla Factorio, the tasks of construction robots cannot be read as circuit signals, yet this is crucial for automating construction. This mod focuses on solving that. It adds a new entity that reads the ghost requests within the whole surface or its logistics network and outputs them as circuit signals, fully configurable via a GUI. It supports adjusting the filter mode (entities | tiles | upgrades | items) and the quantity mode (supply requests | recycling requests).
 
@@ -122,7 +122,7 @@ The mod prefers event-driven updates over per-frame polling:
 
 ```
 ghost-reader/
-├── info.json            # Mod metadata (name=ghost-reader, version=1.1.7)
+├── info.json            # Mod metadata (name=ghost-reader, version=1.2.0)
 ├── data.lua             # Entity/item/recipe/technology + sprite redirect
 ├── data-updates.lua     # Creation effect for reading item requests
 ├── control.lua          # Scanning, two-way counting, signal output, GUI, events
