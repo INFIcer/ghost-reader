@@ -661,6 +661,30 @@ end
 --   现改为 IRP 式 round-robin：每帧只处理 DECON_POLL_PER_TICK 个快照（游标轮转），
 --   且按快照记录的位置做小区域 find 获取实体（O(区域)），不整表面扫描；
 --   可移动实体在小区域找不到时再做一次该表面的有界兜底扫描。每帧成本 O(budget)。
+-- 按 unit_number + 快照位置取被标记拆除的实体（get_entity_by_unit_number 只对带
+-- "get-by-unit-number" 能力的实体有效，普通建筑/容器不可靠，故用 find）。
+-- 优先在快照位置附近小区域找（覆盖静态/微动实体）；可移动实体（已移走）再全表面
+-- 有界兜底。返回实体（且仍 to_be_deconstructed）或 nil。
+local function decon_entity_by_unit(unit, data)
+  if not (data and data.surface_index) then return nil end
+  local surface = game.get_surface(data.surface_index)
+  if not surface then return nil end
+  local ent = nil
+  local area = { { data.x - 1.5, data.y - 1.5 }, { data.x + 1.5, data.y + 1.5 } }
+  for _, e in ipairs(surface.find_entities_filtered{area = area, limit = 1}) do
+    if e.valid and e.unit_number == unit then ent = e; break end
+  end
+  if not ent and data.movable then
+    -- 可移动实体可能已移出小区域：全表面按 unit 有界兜底（仅可移动类型）
+    for _, e in ipairs(surface.find_entities_filtered{}) do
+      if e.valid and e.unit_number == unit then ent = e; break end
+    end
+  end
+  if ent and ent.valid and not ent.to_be_deconstructed then ent = nil end
+  if ent and ent.valid and ent.position then return ent end
+  return nil
+end
+
 local function poll_decon_movers(mark_pending)
   local snaps = storage[DECON_MOVERS]
   if not snaps or not next(snaps) then return end
@@ -695,9 +719,9 @@ local function poll_decon_movers(mark_pending)
   for _, unit in ipairs(units) do
     local data = snaps[unit]
     if data then
-      -- 直接按 unit_number 取实体（O(1)，无需 find_entities_filtered），对可移动实体也可靠
-      local ent = game.get_entity_by_unit_number(unit)
-      if ent and ent.valid and not ent.to_be_deconstructed then ent = nil end
+      -- 取被标记拆除的实体（get_entity_by_unit_number 对普通建筑不可靠，封装在
+      -- decon_entity_by_unit 内：优先小区域 find，可移动实体移出再全表面兜底）。
+      local ent = decon_entity_by_unit(unit, data)
       if ent and ent.valid and ent.position then
         local t = tile_pos(ent.position)
         local ot = tile_pos(data)
@@ -711,6 +735,8 @@ local function poll_decon_movers(mark_pending)
           return table.concat(p, ";")
         end
         local stock_changed = (fp(old_items) ~= fp(new_items))
+        log("[gr-dbg][decon] unit="..tostring(unit).." ent="..tostring(ent and ent.name or "nil")
+          .." stock_changed="..tostring(stock_changed).." old="..fp(old_items).." new="..fp(new_items))
         if moved or stock_changed then
           local si = ent.surface.index
           for item, n in pairs(old_items) do
