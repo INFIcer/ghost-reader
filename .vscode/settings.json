@@ -1,0 +1,43 @@
+{
+    // ============================================================
+    // EmmyLua (sumneko.lua) —— 通用 Factorio mod 开发配置
+    // 普适所有 mod：库指向 factorio-api/（由官方 API 数据生成），
+    // 与具体项目逻辑无关。
+    // ============================================================
+
+    // Factorio 使用 Lua 5.1，设为 5.1 以获得正确的标准库补全。
+    "Lua.runtime.version": "Lua 5.1",
+    "Lua.runtime.fileEncoding": "utf8",
+
+    // 关键：把 factorio-api/ 加入工作区库，使 game / script / defines /
+    // storage 及各 Lua* 运行时类型获得补全、跳转与类型检查。
+    "Lua.workspace.library": [
+        "${workspaceFolder}/factorio-api"
+    ],
+
+    // Factorio 运行时全局对象（library 中已声明类型，这里再列出防止误报）。
+    "Lua.diagnostics.globals": [
+        "game",
+        "script",
+        "defines",
+        "storage",
+        "log"
+    ],
+
+    // 关闭若干对 Factorio 动态结构（事件参数、storage、动态字段）过严的检查。
+    "Lua.diagnostics.disable": [
+        "need-check-nil",
+        "undefined-field",
+        "duplicate-set-field",
+        "missing-return",
+        "inject-field"
+    ],
+
+    "Lua.diagnostics.enable": true,
+    "Lua.diagnostics.workspaceDelay": 1000,
+
+    // 忽略 .git，避免工作区库扫描到无关内容
+    "Lua.workspace.ignoreDir": [
+        ".git"
+    ]
+}
