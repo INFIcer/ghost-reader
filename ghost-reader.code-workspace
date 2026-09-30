@@ -7,5 +7,16 @@
 			"path": ".."
 		}
 	],
-	"settings": {}
+	"settings": {
+		"Lua.workspace.userThirdParty": [
+			"c:\\Users\\Administrator\\AppData\\Roaming\\Code\\User\\workspaceStorage\\4450aeddc0065f1cc1825644656d0770\\justarandomgeek.factoriomod-debug\\sumneko-3rd"
+		],
+		"Lua.workspace.checkThirdParty": "ApplyInMemory",
+		"factorio.versions": [
+			{
+				"name": "2.1.17",
+				"factorioPath": "d:\\SteamLibrary\\steamapps\\common\\Factorio\\bin\\x64\\factorio.exe"
+			}
+		]
+	}
 }
