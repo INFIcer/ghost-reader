@@ -9,18 +9,23 @@
 local M = {}
 
 -- 实体原型 -> 可放置物品名（若无则 nil）
+---comment
+---@param name string
+---@return LuaItemPrototype|nil
 local function item_for_entity(name)
   local p = prototypes.entity[name]
   if p and p.items_to_place_this and #p.items_to_place_this > 0 then
-    return p.items_to_place_this[1].name
+    return prototypes.item[p.items_to_place_this[1].name]
   end
 end
 
 -- 地格原型 -> 可放置物品名（若无则 nil）
+---@param name string
+---@return LuaItemPrototype|nil
 local function item_for_tile(name)
   local p = prototypes.tile[name]
   if p and p.items_to_place_this and #p.items_to_place_this > 0 then
-    return p.items_to_place_this[1].name
+    return prototypes.item[p.items_to_place_this[1].name]
   end
 end
 
@@ -36,7 +41,7 @@ local function mineable_products(name)
   for _, pr in ipairs(mp.products) do
     if pr and pr.name then
       local prob = pr.probability
-      if prob == nil then prob = 1 end   -- nil 表示必掉（100%）
+      if prob == nil then prob = 1 end -- nil 表示必掉（100%）
       if prob ~= 0 then
         local amount = pr.amount
         if not amount and pr.amount_min and pr.amount_max then
@@ -95,9 +100,15 @@ end
 -- 移动判定用实体 type（无原型可读的 movable 字段）：rolling-stock / car / spider-vehicle /
 -- character 等。内容判定沿用 recycle_entity_contents 依赖的类型。
 local MOVABLE_TYPES = {
-  ["rolling-stock"] = true, ["car"] = true, ["spider-vehicle"] = true,
-  ["character"] = true, ["locomotive"] = true, ["cargo-wagon"] = true,
-  ["fluid-wagon"] = true, ["artillery-wagon"] = true, ["land-mine"] = true,
+  ["rolling-stock"] = true,
+  ["car"] = true,
+  ["spider-vehicle"] = true,
+  ["character"] = true,
+  ["locomotive"] = true,
+  ["cargo-wagon"] = true,
+  ["fluid-wagon"] = true,
+  ["artillery-wagon"] = true,
+  ["land-mine"] = true,
 }
 -- 是否有储物格（inventory）。标记拆除的实体在特殊情况下可能增加内部库存（库存从
 -- 无到有），故不能以"当前内容是否为空"作筛选；但完全无储物格的实体（管道/墙/灯等）
@@ -113,8 +124,8 @@ end
 local function needs_decon_tracking(en)
   if not (en and en.valid) then return false end
   local et = en.type
-  if MOVABLE_TYPES[et] then return true end   -- 可移动：位置会变（进出建设区域）
-  if has_inventory(en) then return true end   -- 有储物格：内部物品可能从无到有变化
+  if MOVABLE_TYPES[et] then return true end -- 可移动：位置会变（进出建设区域）
+  if has_inventory(en) then return true end -- 有储物格：内部物品可能从无到有变化
   -- 非库存携带物：传送带/机械臂的运输线货物、手持物（无 inventory 但携带物会变）
   if et == "transport-belt" or et == "underground-belt" or et == "splitter" or et == "inserter" then
     return true
@@ -130,6 +141,10 @@ end
 
 -- 把一个被标记拆除的实体，按类别累加进 recycle 表。
 -- include_entities / include_items 控制是否计入实体本身 / 物品。
+---@param en LuaEntity
+---@param include_entities boolean
+---@param include_items boolean
+---@param recycle table
 local function recycle_entity_contents(en, include_entities, include_items, recycle)
   local et = en.type
   -- 落地物品：按 stack 物品名 × 数量计为【物品】。
@@ -158,24 +173,15 @@ local function recycle_entity_contents(en, include_entities, include_items, recy
   end
   -- 内部物品/模块作为【物品】（跳过模块库存重复）。
   if include_items then
-    local minv = en.get_module_inventory()
-    for inv_index = 1, 40 do
+    for inv_index = 1, en.get_max_inventory_index() do
       local tinv = en.get_inventory(inv_index)
       if not tinv then goto skip_recycle_inv end
-      if minv and tinv == minv then goto skip_recycle_inv end
       for _, st in pairs(tinv.get_contents()) do
         if st and st.name then
           recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
         end
       end
       ::skip_recycle_inv::
-    end
-    if minv then
-      for _, st in pairs(minv.get_contents()) do
-        if st and st.name then
-          recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
-        end
-      end
     end
     -- 传送带运输线物品 + 机械臂手持物品。
     for name, n in pairs(extra_carry_items(en)) do
