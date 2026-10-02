@@ -1,14 +1,10 @@
+local region = require("region")
 local meta = require("meta")
 local item = require("item")
+local changes = require("__ghost-reader__/dop2/changes")
+local snapshot = require("__ghost-reader__/dop2/snapshot")
+
 local M = {}
-
-
-local changes = {
-    reader_added = {}
-}
-
-
-
 
 ---@param e LuaEntity
 local function on_entity_ghost_built(e)
@@ -33,29 +29,63 @@ local function on_built_entity(event)
     elseif e.type == "tile-ghost" then
         on_tile_ghost_built(e)
     elseif e.name == READER then
-        changes.reader_added.add(e)
+        meta.ensure_reader_meta(e)
+    elseif e.name == "roboport" then
+        local cr = e.logistic_cell.construction_radius
+        local box = {
+            { e.position.x - cr, e.position.y - cr },
+            { e.position.x + cr, e.position.y + cr }
+        }
+        --新建设区域内的实体，标记归属地脏
+        for i, e in e.surface.find_entities(box) do
+            local m = meta.ensure_entity_meta(e)
+            changes.dirty_count_entitiy_region(m)
+        end
+        region.ensure_region_logistic_network(e.logistic_network)
     end
 end
 
+---@param event EventData.on_surface_created
+local function on_surface_created(event)
+    local r = region.ensure_region_surface(game.surfaces[event.surface_index])
+end
+
+---@param event EventData.on_surface_deleted
+local function on_surface_deleted(event)
+    local r = region.ensure_region_surface(game.surfaces[event.surface_index])
+    region.remove_region(r.reg_num)
+end
 
 ---@param event EventData.on_marked_for_deconstruction
 local function on_deconstruction(event)
     local m = meta.ensure_entity_meta(event.entity)
     local recycle = {}
-    item.recycle_entity_contents(event.entity, true, false, recycle)
+    item.recycle_entity_contents(m.entity, true, false, recycle)
     for name, count in pairs(recycle) do
         m:set_count_item('deconstruction', change_type.ENTITY_RECYCLE, item.item_for_entity(name), count)
     end
     recycle = {}
-    item.recycle_entity_contents(event.entity, false, true, recycle)
+    item.recycle_entity_contents(m.entity, false, true, recycle)
     for name, count in pairs(recycle) do
         m:set_count_item('deconstruction', change_type.ITEM_RECYCLE, prototypes.item[name], count)
+    end
+    if item.is_movable(m.entity) then
+        m:register_movable()
+    end
+    if item.has_inventory(m.entity) then
+        m:register_inventory()
     end
 end
 ---@param event EventData.on_cancelled_deconstruction
 local function on_cancel_deconstruction(event)
     local m = meta.ensure_entity_meta(event.entity)
     m:remove_count_item('deconstruction')
+    if m.movable > 0 then
+        m:unregister_movable()
+    end
+    if m.inventory > 0 then
+        m:unregister_inventory()
+    end
     -- set_count_item(m, 'self', change_type.ENTITY_RECYCLE, item.item_for_entity(event.entity.name), 0)
 end
 
@@ -109,6 +139,7 @@ local function irp_removals(irp)
     end
     return out
 end
+
 ---@param event EventData.on_script_trigger_effect
 local function on_irp_created(event)
     if event.effect_id ~= "gr-item-request-proxy" then return end
@@ -120,16 +151,10 @@ local function on_irp_created(event)
 
         if target and target.valid then
             local m = meta.ensure_entity_meta(target)
-
-
-            local function on_irp_destroyed()
-                m:remove_count_item('irp')
-            end
-
-            irp_meta.on_destroyed = on_irp_destroyed
+            irp_meta.proxy_target = m
             for name, t in pairs(irp_requests(e)) do
                 for quality, count in pairs(t) do
-                    m:set_count_item('irp',
+                    m:set_count_item('irp' .. tostring(irp_meta.reg_num),
                         change_type.ITEM_SUPPLY,
                         prototypes.item[name],
                         prototypes.quality[quality],
@@ -138,15 +163,90 @@ local function on_irp_created(event)
             end
             for name, t in pairs(irp_removals(e)) do
                 for quality, count in pairs(t) do
-                    m:set_count_item('irp',
+                    m:set_count_item('irp' .. tostring(irp_meta.reg_num),
                         change_type.ITEM_RECYCLE,
                         prototypes.item[name],
                         prototypes.quality[quality],
                         count)
                 end
             end
+            if item.is_movable(m.entity) then
+                m:register_movable()
+            end
         end
     end
+end
+
+
+local function on_tick()
+    --快照触发计时实体归属地脏、计时实体计数脏（库存变化引发）
+    snapshot.on_tick()
+
+    --清理计时实体归属地(由实体移动引发)
+    for ce, _ in pairs(changes.current.dirty_count_entities_region) do
+        ---@type meta
+        local e = ce
+        if e:vaild() then
+            local new_regions = {}
+            local logistic_networks = e.entity.surface.find_logistic_networks_by_construction_area(e.entity.position,
+                e.entity.force)
+            for _, logistic_network in ipairs(logistic_networks) do
+                table.insert(new_regions, region.ensure_region_logistic_network(logistic_network))
+            end
+            local surface = e.entity.surface.find_logistic_networks_by_construction_area(e.entity.position,
+                e.entity.force)
+            table.insert(new_regions, region.ensure_region_surface(surface))
+
+            local add, remove = get_unique_elements(new_regions, e.count_entity_regions)
+
+            for _, ar in ipairs(add) do
+                e:add_to_region(ar)
+            end
+            for _, rr in ipairs(remove) do
+                e:remove_from_region(rr)
+            end
+        end
+    end
+
+    --计数从计时实体污染到归属地(计数脏由各类事件、库存变化引发)
+    for ce, _ in pairs(changes.current.dirty_count_entities_output) do
+        for _, r in ipairs(ce.count_entity_regions) do
+            changes.dirty_region_output(r)
+        end
+    end
+
+    --清理归属地计数
+    for region, _ in pairs(changes.current.dirty_regions_output) do
+        if region:vaild() then
+            region:update_count()
+            for reader, _ in pairs(region.readers) do
+                changes.dirty_reader_output(reader)
+            end
+        end
+    end
+
+    --清理读取器归属地
+    for reader, _ in pairs(changes.current.dirty_readers_region) do
+        ---@type meta
+        local r = reader
+        if r:vaild() then
+            local logistic_network = r.entity.surface.find_logistic_network_by_position(r.entity.position, r.entity
+                .force)
+            r:reader_set_region(region.ensure_region_logistic_network(logistic_network))
+            changes.dirty_reader_output(r)
+        end
+    end
+
+
+    --清理读取器计数
+    for reader, _ in pairs(changes.dirty_readers_output) do
+        ---@type meta
+        local r = reader
+        r:write_outputs()
+    end
+
+
+    changes.clear()
 end
 
 ---comment
@@ -154,12 +254,6 @@ end
 local function on_destroyed(event)
     ---需要处理
     local m = meta.get_meta(event.registration_number)
-    if m.on_destroyed then
-        m.on_destroyed()
-    end
-
-
-    m:clear_count_item()
     meta.remove_meta(event.registration_number)
 end
 function M.register()
@@ -176,9 +270,12 @@ function M.register()
     script.on_event(defines.events.on_cancelled_deconstruction, on_cancel_deconstruction)
     script.on_event(defines.events.on_marked_for_upgrade, on_upgrade)
     script.on_event(defines.events.on_cancelled_upgrade, on_cancel_upgrade)
-    script.on_event(defines.events.on_pre_ghost_upgraded, on_upgrade)
+    -- script.on_event(defines.events.on_pre_ghost_upgraded, on_upgrade)
     script.on_event(defines.events.on_script_trigger_effect, on_irp_created)
+    script.on_event(defines.events.on_tick, on_tick)
+
+    script.on_event(defines.events.on_surface_created, on_surface_created)
+    script.on_event(defines.events.on_surface_deleted, on_surface_deleted)
 end
 
-M.changes = changes
 return M

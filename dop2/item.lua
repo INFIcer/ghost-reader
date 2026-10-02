@@ -29,13 +29,15 @@ local function item_for_tile(name)
   end
 end
 
+
 -- 环境实体（树/鱼/岩石等）的期望挖掘产物：{ [item] = 数量 }。
 -- 没有 items_to_place_this，改从 mineable_properties.products 取，
 -- 数量 = amount × probability，四舍五入取整（至少 1）。
-local function mineable_products(name)
-  local p = prototypes.entity[name]
-  if not p then return nil end
-  local ok, mp = pcall(function() return p.mineable_properties end)
+---@param prototype LuaEntityPrototype
+---@return nil
+local function mineable_products(prototype)
+  if not prototype then return nil end
+  local ok, mp = pcall(function() return prototype.mineable_properties end)
   if not (ok and mp and mp.products) then return nil end
   local out = {}
   for _, pr in ipairs(mp.products) do
@@ -91,6 +93,22 @@ local function extra_carry_items(en)
   end
   return out
 end
+---有内部库存
+---@param en LuaEntity
+---@return boolean
+local function has_inventory(en)
+  --有储物格
+  for i = 1, en.get_max_inventory_index() do
+    local ok, inv = pcall(function() return en.get_inventory(i) end)
+    if ok and inv then return true end
+  end
+  --传送带或机械臂
+  local et = en.type
+  if et == "transport-belt" or et == "underground-belt" or et == "splitter" or et == "inserter" then
+    return true
+  end
+  return false
+end
 
 -- 判断实体是否需要"动态拆除跟踪"（即记录到 DECON_MOVERS 供 poll_decon_movers 每帧
 -- 检测位置/内容物变化）。仅在下列情况才需要：
@@ -109,17 +127,8 @@ local MOVABLE_TYPES = {
   ["fluid-wagon"] = true,
   ["artillery-wagon"] = true,
   ["land-mine"] = true,
+  ["item-entity"] = true,
 }
--- 是否有储物格（inventory）。标记拆除的实体在特殊情况下可能增加内部库存（库存从
--- 无到有），故不能以"当前内容是否为空"作筛选；但完全无储物格的实体（管道/墙/灯等）
--- 不可能发生库存变化，无需追踪。遍历 get_inventory 找第一个非 nil 槽（上限保护）。
-local function has_inventory(en)
-  for i = 1, 20 do
-    local ok, inv = pcall(function() return en.get_inventory(i) end)
-    if ok and inv then return true end
-  end
-  return false
-end
 
 local function needs_decon_tracking(en)
   if not (en and en.valid) then return false end
@@ -134,6 +143,9 @@ local function needs_decon_tracking(en)
 end
 
 -- 是否可移动（位置会变，需检测进出建设区域）。不可移动但有内容物的实体只需内容检测。
+---comment
+---@param en LuaEntity
+---@return boolean
 local function is_movable(en)
   if not (en and en.valid) then return false end
   return MOVABLE_TYPES[en.type] ~= nil
@@ -144,7 +156,7 @@ end
 ---@param en LuaEntity
 ---@param include_entities boolean
 ---@param include_items boolean
----@param recycle table
+---@param recycle table<LuaItem>
 local function recycle_entity_contents(en, include_entities, include_items, recycle)
   local et = en.type
   -- 落地物品：按 stack 物品名 × 数量计为【物品】。
@@ -158,7 +170,7 @@ local function recycle_entity_contents(en, include_entities, include_items, recy
   end
   -- 环境实体（无 items_to_place_this）：其挖掘产物归类为【物品】。
   if include_items and not item_for_entity(en.name) then
-    local prods = mineable_products(en.name)
+    local prods = mineable_products(en.prototype)
     if prods then
       for prod, n in pairs(prods) do
         recycle[prod] = (recycle[prod] or 0) + n
