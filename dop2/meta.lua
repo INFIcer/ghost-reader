@@ -26,7 +26,7 @@ local objects_meta = {}
 ---@field count_items table<string,count_item> 计数项，仅在计数实体上可访问
 ---@field proxy_target meta 请求容器实体的元数据，仅在IRP上可访问
 ---@field reader_region region 读取器所在归属地，仅在读取器上可访问
----@field robotport_region region 平台所在归属地，用于在平台被删除时更新归属地。仅在无人机平台上可访问
+---@field roboport_region region 平台所在归属地，用于在平台被删除时更新归属地。仅在无人机平台上可访问
 ---@field cbox BoundingBox 平台的建设范围，仅在无人机平台上可访问
 ---@field lbox BoundingBox 平台的物流范围，仅在无人机平台上可访问
 ---@field count_entity_regions table<region,any> 计数实体所在归属地，仅在计数实体上可访问
@@ -252,7 +252,7 @@ function meta:on_destroyed()
     self:reader_set_region(nil)
     --无人机平台清理(由于无人机平台删除导致归属地尺寸收缩)
     --此处实体已被摧毁（on_object_destroyed 在销毁后触发），只能用创建时保留的 surface
-    if self.robotport_region and self.surface then
+    if self.roboport_region and self.surface then
         for i, e in self.surface.find_entities_filtered({ area = self.lbox, name = READER }) do
             local m = M.ensure_reader_meta(e)
             changes.dirty_reader_region(m)
@@ -296,14 +296,14 @@ end
 
 ---@return meta register_meta 注册的元信息
 ---@param port LuaEntity 要进行注册的机器人平台
-function M.ensure_robotport_meta(port)
+function M.ensure_roboport_meta(port)
     local reg_num = script.register_on_object_destroyed(port)
     local m = objects_meta[reg_num]
     if m == nil then
         m = meta:new(reg_num, port)
         objects_meta[reg_num] = m
         local r = region.ensure_region_logistic_network(port.logistic_network)
-        m.robotport_region = r
+        m.roboport_region = r
         local logistic_cell = port.logistic_cell
         local lbox = box(port.position, logistic_cell.logistic_radius)
         local cbox = box(port.position, logistic_cell.logistic_radius)

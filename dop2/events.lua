@@ -52,19 +52,13 @@ local function on_built_entity(event)
         --真实读取器建成：依次从 tags / pending_tags / ghost_cfg 继承配置
         bplib.apply_reader_config_from_tags(e)
     elseif e.name == "roboport" then
-        meta.ensure_robotport_meta(e)
+        meta.ensure_roboport_meta(e)
     end
 end
 
 ---@param event EventData.on_surface_created
 local function on_surface_created(event)
-    local r = region.ensure_region_surface(game.surfaces[event.surface_index])
-end
-
----@param event EventData.on_surface_deleted
-local function on_surface_deleted(event)
-    local r = region.ensure_region_surface(game.surfaces[event.surface_index])
-    region.remove_region(r.reg_num)
+    region.ensure_region_surface(game.surfaces[event.surface_index])
 end
 
 ---@param event EventData.on_marked_for_deconstruction
@@ -104,7 +98,7 @@ end
 local function on_upgrade(event)
     local m = meta.ensure_entity_meta(event.entity)
     m:set_count_item('upgrade', change_type.UPGRADE_SUPPLY, item.item_for_entity(event.target.name), event.entity
-    .quality, 1)
+        .quality, 1)
     m:set_count_item('upgrade', change_type.UPGRADE_RECYCLE, item.item_for_entity(event.previous_target.name),
         event.entity.quality, 1)
 end
@@ -217,9 +211,9 @@ end
 ---comment
 ---@param event EventData.on_object_destroyed
 local function on_destroyed(event)
-    ---需要处理
-    -- local m = meta.get_meta(event.registration_number)
-    meta.remove_meta(event.registration_number)
+    local reg_num = event.registration_number
+    region.remove_region(reg_num)
+    meta.remove_meta(reg_num)
 end
 function M.register()
     script.on_event(defines.events.on_built_entity, on_built_entity)
@@ -240,7 +234,6 @@ function M.register()
     script.on_event(defines.events.on_tick, on_tick)
 
     script.on_event(defines.events.on_surface_created, on_surface_created)
-    script.on_event(defines.events.on_surface_deleted, on_surface_deleted)
 
     -- GUI：读取器配置面板
     script.on_event(defines.events.on_gui_opened, gui.on_gui_opened)

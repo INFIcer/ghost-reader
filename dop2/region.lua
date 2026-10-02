@@ -148,6 +148,7 @@ function M.ensure_region_surface(surface)
     local m = regions[reg_num]
     if m == nil then
         m = region:new_surface(reg_num, surface)
+        regions[reg_num] = m
     end
     return m
 end
@@ -157,13 +158,19 @@ function M.ensure_region_logistic_network(logistic_network)
     local m = regions[reg_num]
     if m == nil then
         m = region:new_logistic_network(reg_num, logistic_network)
+        regions[reg_num] = m
     end
     return m
 end
 
+---@param reg_num uint64 归属地的注册号
+---@return boolean 是否确实回收了一个归属地
 function M.remove_region(reg_num)
-    regions[reg_num]:on_destroyed()
+    local r = regions[reg_num]
+    if not r then return false end
+    r:on_destroyed()
     regions[reg_num] = nil
+    return true
 end
 
 M.surface_name = surface_name
