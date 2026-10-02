@@ -10,6 +10,12 @@ COUNT_DECON_INVENTORY = "deconstruction-inventory"  --被拆实体携带的物�
 ---@type string
 COUNT_IRP_PREFIX = "irp"                            --IRP 计数项前缀（后接 IRP 的注册号）
 
+---品质筛选的"全部"取值。品质筛选的其余取值是品质原型名（LuaQualityPrototype.name）。
+---用字符串而不是品质原型：与其它枚举一致，可安全存 storage、写进蓝图 tags，
+---旧存档里存的也是名字，不需要迁移。
+---@type string
+QUALITY_ALL = "all"
+
 --- 共享的空集合。比较过程只读传入的集合，故复用安全。
 local EMPTY_SET = {}
 
@@ -137,14 +143,13 @@ function match_count(kind, count)
 end
 
 ---comment
----@param quality string
----@param filiter? string
-function match_quality(quality, filiter)
-    if not filiter then
+---@param quality string 物品的品质名（LuaQualityPrototype.name）
+---@param filter? string 品质筛选：QUALITY_ALL 或品质名；nil 视为不筛选
+function match_quality(quality, filter)
+    if not filter or filter == QUALITY_ALL then
         return true
-    else
-        return quality == filiter
     end
+    return quality == filter
 end
 
 ---@param kind change_type

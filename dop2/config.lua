@@ -2,7 +2,7 @@ local M = {}
 
 local DEFAULT_RANGE = range_mode.NETWORK
 local DEFAULT_FILTER = filter_mode.ALL
-local DEFAULT_QUALITY = nil
+local DEFAULT_QUALITY = QUALITY_ALL
 local DEFAULT_COUNT = count_mode.NET
 
 local function reader_storage(unit)

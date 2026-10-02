@@ -69,7 +69,7 @@ local function valid_values()
     return valid_values_cache
 end
 
----配置 → tags
+---配置 → tags（四个值都是可直接序列化的字符串）
 ---@param cfg table 配置（config.reader_config 的返回值）
 ---@return Tags
 local function encode(cfg)
@@ -77,7 +77,7 @@ local function encode(cfg)
     if cfg.mode then tags[TAG_MODE] = cfg.mode end
     if cfg.filter then tags[TAG_FILTER] = cfg.filter end
     if cfg.count then tags[TAG_COUNT] = cfg.count end
-    if cfg.quality then tags[TAG_QUALITY] = cfg.quality.name end
+    if cfg.quality then tags[TAG_QUALITY] = cfg.quality end
     return tags
 end
 
@@ -92,10 +92,12 @@ local function decode(tags)
     if valid.mode[tags[TAG_MODE]] then cfg.mode = tags[TAG_MODE] end
     if valid.filter[tags[TAG_FILTER]] then cfg.filter = tags[TAG_FILTER] end
     if valid.count[tags[TAG_COUNT]] then cfg.count = tags[TAG_COUNT] end
+    --品质存的是品质名（"all" 表示不筛选），与 storage.readers 里的表示一致
     local quality_name = tags[TAG_QUALITY]
     if type(quality_name) == "string" then
-        local quality = prototypes.quality[quality_name]
-        if quality then cfg.quality = quality end
+        if quality_name == QUALITY_ALL or prototypes.quality[quality_name] then
+            cfg.quality = quality_name
+        end
     end
     if cfg.mode or cfg.filter or cfg.count or cfg.quality then return cfg end
     return nil

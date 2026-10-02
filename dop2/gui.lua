@@ -29,6 +29,7 @@ local GR_GUI_STATUS = "gr_gui_status"
 local GR_GUI_MODE = "gr_gui_mode"
 local GR_GUI_FILTER = "gr_gui_filter"
 local GR_GUI_COUNT = "gr_gui_count"
+local GR_GUI_QUALITY = "gr_gui_quality"
 local GR_GUI_CLOSE = "gr_gui_close"
 
 --================================================================================================
@@ -67,6 +68,36 @@ local function count_options()
         { { "gr-gui.qty-supply" },  count_mode.SUPPLY },
         { { "gr-gui.qty-recycle" }, count_mode.RECYCLE },
     }
+end
+
+---品质筛选下拉选项缓存（品质原型在会话内固定，只构造一次）
+---@type table[]|nil
+local quality_options_cache
+
+---品质筛选的下拉选项：全部 + 各品质（按品质等级升序）。
+---第二项是品质名（字符串），QUALITY_ALL 表示不筛选。
+---@return table[] { {本地化名, 品质名}, ... }
+local function quality_options()
+    if not quality_options_cache then
+        local qualities = {}
+        --prototypes.quality 是 LuaCustomTable，只能用 pairs 遍历
+        for _, quality in pairs(prototypes.quality) do
+            if not quality.hidden then
+                qualities[#qualities + 1] = quality
+            end
+        end
+        table.sort(qualities, function(a, b)
+            if a.level ~= b.level then return a.level < b.level end
+            return a.name < b.name
+        end)
+
+        local options = { { { "gr-gui.quality-all" }, QUALITY_ALL } }
+        for _, quality in ipairs(qualities) do
+            options[#options + 1] = { quality.localised_name or { "", quality.name }, quality.name }
+        end
+        quality_options_cache = options
+    end
+    return quality_options_cache
 end
 
 ---取枚举值对应的本地化名（复用下拉框选项，避免再维护一份枚举->文本的映射）
@@ -270,6 +301,7 @@ local function build(player, entity)
     add_status_row(content, { "gr-gui.current-range" }, status_text(entity, m))
     add_dropdown_row(content, { "gr-gui.filter" }, GR_GUI_FILTER, filter_options(), config.get_filter(unit))
     add_dropdown_row(content, { "gr-gui.qty" }, GR_GUI_COUNT, count_options(), config.get_count(unit))
+    add_dropdown_row(content, { "gr-gui.quality" }, GR_GUI_QUALITY, quality_options(), config.get_quality(unit))
     content.add { type = "label", caption = { "gr-gui.output" }, style = "frame_subheading_label" }
     content.add { type = "table", name = GR_GUI_TABLE, column_count = 6 }
     rebuild_table(content[GR_GUI_TABLE], m)
@@ -329,6 +361,8 @@ function M.on_gui_selection_state_changed(event)
         options = filter_options()
     elseif element.name == GR_GUI_COUNT then
         options = count_options()
+    elseif element.name == GR_GUI_QUALITY then
+        options = quality_options()
     else
         return
     end
@@ -351,8 +385,10 @@ function M.on_gui_selection_state_changed(event)
         config.set_mode(unit, option[2])
     elseif element.name == GR_GUI_FILTER then
         config.set_filter(unit, option[2])
-    else
+    elseif element.name == GR_GUI_COUNT then
         config.set_count(unit, option[2])
+    else
+        config.set_quality(unit, option[2])
     end
 
     local m = meta.get_meta_of(reader)
@@ -385,7 +421,7 @@ end
 ---@type table<uint64,string>
 local tooltip_fingerprints = {}
 
----刷新读取器悬浮提示（4 个字段：范围模式/当前范围/筛选/数量）
+---刷新读取器悬浮提示（5 个字段：范围模式/当前范围/筛选/数量/品质）
 ---@param reader LuaEntity
 function M.update_tooltip(reader)
     if not (reader and reader.valid and reader.name == READER) then return end
@@ -395,10 +431,11 @@ function M.update_tooltip(reader)
     local mode = config.get_mode(unit)
     local filter = config.get_filter(unit)
     local count = config.get_count(unit)
+    local quality = config.get_quality(unit)
     local region_id = m and m.reader_region and m.reader_region.reg_num or 0
     --单位号不会复用，故指纹可以安全地按单位号缓存
     local fingerprint = table.concat({
-        tostring(mode), tostring(filter), tostring(count), tostring(region_id),
+        tostring(mode), tostring(filter), tostring(count), tostring(quality), tostring(region_id),
     }, "|")
     if tooltip_fingerprints[unit] == fingerprint then return end
 
@@ -410,6 +447,7 @@ function M.update_tooltip(reader)
             { { "gr-tooltip.current-range" }, status_text(reader, m) },
             { { "gr-tooltip.filter" }, locale_of(filter_options(), filter) },
             { { "gr-tooltip.qty" }, locale_of(count_options(), count) },
+            { { "gr-tooltip.quality" }, locale_of(quality_options(), quality) },
         }
         for index, field in ipairs(fields) do
             reader.set_tooltip_field { name = field[1], value = field[2], order = 50 + index }
