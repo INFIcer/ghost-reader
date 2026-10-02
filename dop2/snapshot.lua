@@ -53,7 +53,7 @@ end
 ---comment
 ---@param snapshot snapshot
 local function check(snapshot)
-    if snapshot.entity and snapshot.entity.valid() then
+    if snapshot.entity and snapshot.entity.valid then
         local new = snapshot.update_mod(snapshot.entity)
         if snapshot.snaps ~= new then
             snapshot.snaps = new
@@ -127,14 +127,21 @@ end
 
 local M = {}
 
+---comment
+---@param entity LuaEntity
+---@return snapshot
 function M.add_inventory_snapshot(entity)
     local ss = snapshot:new(entity, update_inventories)
     table.insert(active_unchecked, ss)
+    return ss
 end
 
+---@param entity LuaEntity
+---@return snapshot
 function M.add_tilepos_snapshot(entity)
     local ss = snapshot:new(entity, update_pos)
     table.insert(active_unchecked, ss)
+    return ss
 end
 
 ---comment

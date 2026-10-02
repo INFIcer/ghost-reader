@@ -1,4 +1,5 @@
 local changes = require("__ghost-reader__/dop2/changes")
+local count_item = require("__ghost-reader__/dop2/count_item")
 ---@type table<uint64,region>
 local regions = {}
 
@@ -9,7 +10,7 @@ local regions = {}
 ---@field logistic_network LuaLogisticNetwork
 ---@field readers table<meta,any>
 ---@field count_entities table<meta,any>
----@field count table<change_type,table<LuaItemPrototype,table<LuaQualityPrototype,int>>>
+---@field count count_item 归属地内所有计数实体合并后的计数
 local region = {}
 
 
@@ -45,40 +46,50 @@ function region:new_logistic_network(reg_num, logistic_network)
     return obj
 end
 
+---获取表面的显示名称（行星用原型名，太空平台/普通表面用其名字）
+---@param surface LuaSurface
+---@return LocalisedString
+local function surface_name(surface)
+    if surface.planet then return surface.planet.prototype.localised_name end
+    if surface.platform then return { "", surface.platform.name } end
+    return { "", surface.name }
+end
+
 ---获取名称
 ---@return LocalisedString
 function region:name()
     if self.surface then
-        if self.surface.planet then return self.surface.planet.prototype.localised_name end
-        if self.surface.platform then return { "", self.surface.platform.name } end
-        return { "", self.surface.name }
+        return surface_name(self.surface)
     else
         if self.logistic_network.custom_name then return { "", self.logistic_network.custom_name } end
         return { "", { "gr-gui.network-prefix" }, tostring(self.logistic_network.network_id) }
     end
 end
 
----更新计数
+---更新计数：把所有计数实体的计数项合并成一个计数项
 function region:update_count()
-    self.count = {}
+    ---@type count_item
+    local count = count_item.create()
     for meta, _ in pairs(self.count_entities) do
-        local deconstruction_mark = meta.count_items.deconstruction
-        for name, count_table in pairs(meta.count_items) do
-            if deconstruction_mark and has_prefix(name, 'irp') then
-                --有销毁标志时跳过irp统计
-            else
-                for kind, t1 in pairs(count_table) do
-                    if not self.count[kind] then self.count[kind] = {} end
-                    for item, t2 in pairs(t1) do
-                        if not self.count[kind][item] then self.count[kind][item] = {} end
-                        for quality, count in pairs(t2) do
-                            self.count[kind][item][quality] = (self.count[kind][item][quality] or 0) + count
+        local count_items = meta.count_items
+        if count_items then
+            local deconstruction_mark = count_items.deconstruction
+            for name, item_count in pairs(count_items) do
+                if deconstruction_mark and has_prefix(name, 'irp') then
+                    --有销毁标志时跳过irp统计
+                else
+                    for kind, item_counts in pairs(item_count) do
+                        for item, quality_counts in pairs(item_counts) do
+                            for quality, n in pairs(quality_counts) do
+                                count:add(kind, item, quality, n)
+                            end
                         end
                     end
                 end
             end
         end
     end
+    self.count = count
 end
 
 ---添加读取器元数据
@@ -152,5 +163,7 @@ function M.remove_region(reg_num)
     regions[reg_num]:on_destroyed()
     regions[reg_num] = nil
 end
+
+M.surface_name = surface_name
 
 return M

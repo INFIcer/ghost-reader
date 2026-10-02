@@ -3,6 +3,7 @@ local config = require('__ghost-reader__/dop2/config')
 local snapshot = require("__ghost-reader__/dop2/snapshot")
 local region = require("__ghost-reader__/dop2/region")
 local counter = require("__ghost-reader__/dop2/counter")
+local count_item = require("__ghost-reader__/dop2/count_item")
 
 
 ---模块对外暴露部分
@@ -12,39 +13,13 @@ local M = {}
 ---@type table<uint64,meta>
 local objects_meta = {}
 
----@class count_item
-local count_item = {}
-function count_item:new()
-    local obj = {}
-    setmetatable(obj, { __index = self })
-    return obj
-end
-
----设置计数
----@param kind change_type
----@param item LuaItemPrototype
----@param quality? LuaQualityPrototype
----@param count int
-function count_item:set(kind, item, quality, count)
-    if not self[kind] then self[kind] = {} end
-    if not self[kind][item] then self[kind][item] = {} end
-    self[kind][item][ensure_quality(quality)] = count
-end
-
----读取计数
----@param kind change_type
----@param item LuaItemPrototype
----@param quality? LuaQualityPrototype
----@return int count
-function count_item:read(kind, item, quality)
-    return self[kind][item][ensure_quality(quality)]
-end
-
 --================================================================================================
 
 ---@class meta
 ---@field reg_num uint64 注册号
 ---@field entity LuaEntity 注册实体
+---@field unit uint64 实体单位号，仅在带单位号的实体上可访问
+---@field surface LuaSurface 实体所在表面（实体摧毁后 entity 不可用，故单独保留）
 ---@field movable int 可移动注册次数，仅在可移动的计数实体上使用
 ---@field tilepos_snapshot snapshot|nil 位置快照，仅在可移动的计数实体上使用
 ---@field inventory int 库存注册次数，仅在有内部库存的计数实体上使用
@@ -65,6 +40,8 @@ function meta:new(reg_num, entity)
     local obj = {
         reg_num = reg_num,
         entity = entity,
+        unit = entity.unit_number,
+        surface = entity.surface,
         movable = 0,
         inventory = 0,
     }
@@ -79,30 +56,29 @@ function meta:get_count_item(name)
     if not self.count_items then self.count_items = {} end
     local obj = self.count_items[name]
     if not obj then
-        obj = count_item:new()
+        obj = count_item.create()
         self.count_items[name] = obj
     end
     return obj
 end
 
 ---设置一个计数项
----@param count_item_name string
+---@param name string 计数项的id
 ---@param kind change_type
 ---@param item? LuaItemPrototype
 ---@param quality? LuaQualityPrototype
 ---@param count int
-function meta:set_count_item(count_item_name, kind, item, quality, count)
-    local count_item = self:get_count_item(count_item_name)
-    if item then
-        count_item:set(kind, item, ensure_quality(quality), count)
-        self:mark_dirty()
-    end
+function meta:set_count_item(name, kind, item, quality, count)
+    if not item then return end
+    --品质兜底在 count_item 内部完成
+    self:get_count_item(name):set(kind, item, quality, count)
+    self:mark_dirty()
 end
 
 ---删除一个计数项
 ---@param name string 计数项的id
 function meta:remove_count_item(name)
-    self.count_items[name] = nil
+    if self.count_items then self.count_items[name] = nil end
     self:mark_dirty()
 end
 
@@ -149,43 +125,72 @@ function meta:mark_dirty()
     changes.dirty_count_entitiy_output(self)
 end
 
----读取器重写信号输出
-function meta:write_outputs()
-    local uint = self.entity.unit_number
-    ---@type LuaConstantCombinatorControlBehavior
-    local cb = self.entity.get_or_create_control_behavior()
-    local section = cb.get_section(1)
-    if not section then section = cb.add_section("") end
-    if not section then return end
-    section.filters = {}
+---读取器当前输出信号
+---按配置的筛选模式/数量模式过滤合并归属地计数，NET 模式下回收计为负数。
+---GUI 信号表与电路输出共用本函数，避免两处各写一遍合并逻辑。
+---@return counter 合并结果：item -> quality -> count
+function meta:read_output()
+    local out = counter.create()
+    local reader_region = self.reader_region
+    --读取器不在任何归属地内（如未接入物流网络）时没有可读的计数
+    if not (reader_region and reader_region.count) then return out end
 
-    ---@type table<LuaItemPrototype ,table<LuaQualityPrototype ,int>>
-    local out = {}
-    for kind, t1 in pairs(self.reader_region.count) do
-        local filter = config.get_filter(uint)
-        local count = config.get_count(uint)
-        if match(kind, filter, count) then
-            local negtive = count == count_mode.NET and match_count(kind, count_mode.RECYCLE)
-            for item, t2 in pairs(t1) do
-                for quality, count in pairs(t2) do
-                    if match_quality(quality.name, config.get_quality(uint)) then
-                        if not out[item] then out[item] = {} end
+    local uint = self.entity.unit_number
+    local filter = config.get_filter(uint)
+    local mode = config.get_count(uint)
+    local quality_filter = config.get_quality(uint)
+    for kind, item_counts in pairs(reader_region.count) do
+        if match(kind, filter, mode) then
+            local negtive = mode == count_mode.NET and match_count(kind, count_mode.RECYCLE)
+            for item, quality_counts in pairs(item_counts) do
+                for quality, count in pairs(quality_counts) do
+                    if match_quality(quality.name, quality_filter) then
                         if negtive then
-                            out[item][quality] = (out[item][quality] or 0) - count
+                            counter.add(out, item, quality, -count)
                         else
-                            out[item][quality] = (out[item][quality] or 0) + count
+                            counter.add(out, item, quality, count)
                         end
                     end
                 end
             end
         end
     end
+    return out
+end
 
-    local i = 0
-    for item, t1 in pairs(out) do
-        for quality, count in pairs(t1) do
-            i = i + 1
-            section.set_slot(i, { value = { type = 'item', name = item.name, quality = quality }, min = count })
+---读取器重写信号输出
+---一个 section 的插槽（filters_count）填满时新建 section 继续填充；
+---本次用不到的旧 section 会被清空，避免残留上一次的信号。
+function meta:write_outputs()
+    ---@type LuaConstantCombinatorControlBehavior
+    local cb = self.entity.get_or_create_control_behavior()
+    --不支持控制行为的实体（如读取器虚影）没有信号输出
+    if not cb then return end
+
+    --先清空所有 section：本次可能用更少的 section，不清就会留下上次的旧信号
+    for index = 1, cb.sections_count do
+        local used = cb.get_section(index)
+        if used then used.filters = {} end
+    end
+
+    local section_index = 0
+    local slot = 0
+    ---@type LuaLogisticSection|nil
+    local section = nil
+    for item, quality_counts in pairs(self:read_output()) do
+        for quality, count in pairs(quality_counts) do
+            if (not section) or slot >= section.filters_count then
+                --当前 section 插槽已满：取下一个（没有就新建）继续填
+                section_index = section_index + 1
+                section = cb.get_section(section_index)
+                if not section then section = cb.add_section("") end
+                --已到 section 数量上限（add_section 返回 nil）或该 section 没有插槽：
+                --剩余信号无处安放，只能丢弃（至少已写入的信号是完整的）
+                if not (section and section.filters_count > 0) then return end
+                slot = 0
+            end
+            slot = slot + 1
+            section.set_slot(slot, { value = { type = 'item', name = item.name, quality = quality }, min = count })
         end
     end
 end
@@ -228,8 +233,11 @@ end
 
 ---为计数实体移除所有归属地
 function meta:clear_regions()
-    for _, region in ipairs(self.count_entity_regions) do
-        region:remove_count_entity(self)
+    --count_entity_regions 是集合（归属地 -> true），须用 pairs 遍历
+    if self.count_entity_regions then
+        for region, _ in pairs(self.count_entity_regions) do
+            region:remove_count_entity(self)
+        end
     end
     self.count_entity_regions = nil
 end
@@ -257,12 +265,13 @@ function meta:on_destroyed()
     --读取器清理
     self:reader_set_region(nil)
     --无人机平台清理(由于无人机平台删除导致归属地尺寸收缩)
-    if self.robotport_region then
-        for i, e in self.entity.surface.find_entities_filtered({ area = self.lbox, name = READER }) do
+    --此处实体已被摧毁（on_object_destroyed 在销毁后触发），只能用创建时保留的 surface
+    if self.robotport_region and self.surface then
+        for i, e in self.surface.find_entities_filtered({ area = self.lbox, name = READER }) do
             local m = M.ensure_reader_meta(e)
             changes.dirty_reader_region(m)
         end
-        for i, e in self.entity.surface.find_entities(self.cbox) do
+        for i, e in self.surface.find_entities(self.cbox) do
             local m = M.ensure_entity_meta(e)
             changes.dirty_count_entitiy_region(m)
         end
@@ -280,6 +289,7 @@ function M.ensure_entity_meta(entity)
     local m = objects_meta[reg_num]
     if m == nil then
         m = meta:new(reg_num, entity)
+        objects_meta[reg_num] = m
         changes.dirty_count_entitiy_region(m)
     end
     return m
@@ -292,6 +302,7 @@ function M.ensure_reader_meta(entity)
     local m = objects_meta[reg_num]
     if m == nil then
         m = meta:new(reg_num, entity)
+        objects_meta[reg_num] = m
         changes.dirty_reader_region(m)
     end
     return m
@@ -304,6 +315,7 @@ function M.ensure_robotport_meta(port)
     local m = objects_meta[reg_num]
     if m == nil then
         m = meta:new(reg_num, port)
+        objects_meta[reg_num] = m
         local r = region.ensure_region_logistic_network(port.logistic_network)
         m.robotport_region = r
         local logistic_cell = port.logistic_cell
@@ -330,10 +342,22 @@ function M.get_meta(reg_num)
     return objects_meta[reg_num]
 end
 
+---取已注册实体的元信息（不新建）。
+---register_on_object_destroyed 对同一对象重复注册返回同一个注册号，故可安全用作查找键。
+---@param entity LuaEntity
+---@return meta|nil
+function M.get_meta_of(entity)
+    if not (entity and entity.valid) then return nil end
+    return objects_meta[script.register_on_object_destroyed(entity)]
+end
+
 ---@param reg_num uint64 注册号
 function M.remove_meta(reg_num)
-    objects_meta[reg_num]:on_destroyed()
+    local m = objects_meta[reg_num]
+    if not m then return end
+    --先摘除登记再清理：清理过程会调用 ensure_* 重新登记其他实体
     objects_meta[reg_num] = nil
+    m:on_destroyed()
 end
 
 return M

@@ -1,38 +1,37 @@
 ---@type string
 READER = "ghost-reader"
 
---- 比较两个数组，返回双方独有的元素
--- @param arr1 数组1
--- @param arr2 数组2
--- @return only_in_arr1 仅在 arr1 中出现的元素列表
--- @return only_in_arr2 仅在 arr2 中出现的元素列表
-function get_unique_elements(arr1, arr2)
-    -- 用表作为集合，快速查找
-    local set1, set2 = {}, {}
-    for _, v in ipairs(arr1) do
-        set1[v] = true
-    end
-    for _, v in ipairs(arr2) do
-        set2[v] = true
-    end
+--- 共享的空集合。比较过程只读传入的集合，故复用安全。
+local EMPTY_SET = {}
 
-    local only_in_arr1, only_in_arr2 = {}, {}
+--- 比较两个集合，返回双方独有的键。
+--- 集合是「键 -> 任意值」的表（本项目一律用 true）。这里用集合而不是数组：
+--- 增删判断只需哈希查表，调用方（计数实体的归属地增删）本来也用集合保存。
+---@param set1 table 集合1，nil 视为空集合
+---@param set2 table 集合2，nil 视为空集合
+---@return table only_in_set1 仅在 set1 中出现的键集合
+---@return table only_in_set2 仅在 set2 中出现的键集合
+function get_unique_elements(set1, set2)
+    set1 = set1 or EMPTY_SET
+    set2 = set2 or EMPTY_SET
 
-    -- 找出 arr1 中 arr2 没有的元素
-    for _, v in ipairs(arr1) do
+    local only_in_set1, only_in_set2 = {}, {}
+
+    -- 找出 set1 中 set2 没有的键
+    for v in pairs(set1) do
         if not set2[v] then
-            table.insert(only_in_arr1, v)
+            only_in_set1[v] = true
         end
     end
 
-    -- 找出 arr2 中 arr1 没有的元素
-    for _, v in ipairs(arr2) do
+    -- 找出 set2 中 set1 没有的键
+    for v in pairs(set2) do
         if not set1[v] then
-            table.insert(only_in_arr2, v)
+            only_in_set2[v] = true
         end
     end
 
-    return only_in_arr1, only_in_arr2
+    return only_in_set1, only_in_set2
 end
 
 ---@return boolean
@@ -43,6 +42,19 @@ function contain(table, e)
         end
     end
     return false
+end
+
+---查找元素在列表中的序号
+---@param table table 数组
+---@param e any 要查找的元素
+---@return int index 元素序号，未找到返回 0
+function index_of(table, e)
+    for index, value in ipairs(table) do
+        if value == e then
+            return index
+        end
+    end
+    return 0
 end
 
 function remove(table, e)
@@ -104,7 +116,8 @@ function match_count(kind, count)
         return true
     else
         if count == count_mode.SUPPLY and
-            (kind == change_type.ENTITY_SUPPLY or kind == change_type.TILE_SUPPLY or change_type.UPGRADE_SUPPLY or change_type.ITEM_SUPPLY) then
+            --每个比较都要写全 `kind ==`：漏写会让整条 or 链恒真（等于不筛选）
+            (kind == change_type.ENTITY_SUPPLY or kind == change_type.TILE_SUPPLY or kind == change_type.UPGRADE_SUPPLY or kind == change_type.ITEM_SUPPLY) then
             return true
         elseif count == count_mode.RECYCLE and
             (kind == change_type.ENTITY_RECYCLE or kind == change_type.TILE_RECYCLE or kind == change_type.UPGRADE_RECYCLE or kind == change_type.ITEM_RECYCLE) then

@@ -1,30 +1,43 @@
----@class counter
+---@class counter 计数表：item -> quality -> count
 local counter = {}
+
+---共享元表：计数器会被大量创建（每个计数项、每次归属地重算），
+---不为每个实例再造一张元表。
+local counter_mt = { __index = counter }
 
 ---comment
 ---@return counter
 function counter:new()
-    local obj = {}
-    setmetatable(obj, { __index = self })
-    return obj
+    return setmetatable({}, counter_mt)
 end
 
+---取某个物品的计数行（无则新建）
+---@param item LuaItemPrototype
+---@return table<LuaQualityPrototype,int>
+function counter:row(item)
+    local qualities = self[item]
+    if not qualities then
+        qualities = {}
+        self[item] = qualities
+    end
+    return qualities
+end
+
+---增量修改计数（正负均可）
 ---@param item LuaItemPrototype
 ---@param quality LuaQualityPrototype
 ---@param count integer
 function counter:add(item, quality, count)
-    if not self[item] then item = {} end
-    if not self[item][quality] then self[item][quality] = {} end
-    self[item][quality] = (self[item][quality] or 0) + count
+    local qualities = self:row(item)
+    qualities[quality] = (qualities[quality] or 0) + count
 end
 
+---设置计数（覆盖）
 ---@param item LuaItemPrototype
 ---@param quality LuaQualityPrototype
 ---@param count integer
 function counter:set(item, quality, count)
-    if not self[item] then item = {} end
-    if not self[item][quality] then self[item][quality] = {} end
-    self[item][quality] = count
+    self:row(item)[quality] = count
 end
 
 ---comment
@@ -32,9 +45,9 @@ end
 ---@param quality LuaQualityPrototype
 ---@return integer
 function counter:read(item, quality)
-    if not self[item] then return 0 end
-    if not self[item][quality] then return 0 end
-    return (self[item][quality] or 0)
+    local qualities = self[item]
+    if not qualities then return 0 end
+    return qualities[quality] or 0
 end
 
 local M = {}

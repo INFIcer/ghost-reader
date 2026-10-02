@@ -57,6 +57,9 @@ end
 ---清除所有脏标记
 function M.clear()
     current_changes = changes:new()
+    --M.current 是对外暴露的读取入口，清空后必须同步指向新表，
+    --否则读方（on_tick）会一直遍历已经废弃的旧表。
+    M.current = current_changes
 end
 
 return M

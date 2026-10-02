@@ -1,13 +1,18 @@
 local counter = require("__ghost-reader__/dop2/counter")
 
 
--- dop/items.lua
+-- dop2/item.lua
 --
--- 虚影读取器（Ghost Reader）DOP 重构 —— 物品名解析与回收内容。
+-- 虚影读取器（Ghost Reader）DOP 重构 —— 物品解析与实体携带物品统计。
 --
--- 与性能无关的纯辅助逻辑：实体/地格原型 -> 可放置物品名，环境实体的期望
--- 挖掘产物，传送带/机械臂非库存槽携带物品，以及把一个被标记拆除的实体按
--- 类别累加进 recycle 表。这些函数被事件处理层与归属地重建共用。
+-- 与性能无关的纯辅助逻辑：
+--   * 实体/地格原型 -> 可放置物品名；
+--   * 环境实体的期望挖掘产物；
+--   * 传送带/机械臂非库存槽携带物品；
+--   * 把一个被标记拆除的实体按类别累加进 counter；
+--   * 提取 IRP（item-request-proxy）的请求明细与回收明细。
+-- 这些函数被事件处理层与归属地重建共用，统计结果一律是 counter
+-- （item -> quality -> count），由调用方决定落到哪个计数项、哪个类别。
 
 local M = {}
 
@@ -58,7 +63,11 @@ local function mineable_products(prototype, recycle)
           local expected = amount * prob
           local qty = math.floor(expected + 0.5)
           if qty < 1 then qty = 1 end
-          recycle:add(prototypes.item[pr.name], quality, qty)
+          --产物可能是流体等非物品，取不到物品原型时跳过（计数表只记物品）
+          local item_prototype = prototypes.item[pr.name]
+          if item_prototype then
+            recycle:add(item_prototype, ensure_quality(quality), qty)
+          end
         end
       end
     end
@@ -66,14 +75,12 @@ local function mineable_products(prototype, recycle)
 end
 
 -- 读取实体"非库存槽"携带的物品：传送带运输线上的物品、机械臂手持物品。
--- 返回 { [item] = count }。
+-- 直接累加进 recycle（counter），不再自建 name -> count 表。
 ---comment
 ---@param en LuaEntity
 ---@param recycle counter
----@return table
 local function extra_carry_items(en, recycle)
   local et = en.type
-  local out = {}
   -- 传送带/地下传送带/分流器把货物存在运输线而非库存里。运输线数量随类型不同：
   -- 普通传送带 2 条、地下传送带 4 条、分流器 8 条（内部缓存是额外 line 5-8）。
   -- 遍历到 get_transport_line 返回 nil 为止，带上限保护。
@@ -84,8 +91,10 @@ local function extra_carry_items(en, recycle)
       local okc, contents = pcall(function() return tl.get_contents() end)
       if okc and contents then
         for _, st in pairs(contents) do
-          if st and st.name then
-            out[st.name] = (out[st.name] or 0) + (st.count or 1)
+          --运输线内容物是 ItemStackDefinition，quality 是品质名（需查原型），count 可省略
+          local item_prototype = st and st.name and prototypes.item[st.name] or nil
+          if item_prototype then
+            recycle:add(item_prototype, ensure_quality(prototypes.quality[st.quality]), st.count or 1)
           end
         end
       end
@@ -93,14 +102,16 @@ local function extra_carry_items(en, recycle)
   elseif et == "inserter" then
     local okh, hs = pcall(function() return en.held_stack end)
     if okh and hs then
+      --空手持栈上读 name 会报错，故逐个 pcall 读取；LuaItemStack.quality 已是品质原型
       local okn, name = pcall(function() return hs.name end)
-      local okc, count = pcall(function() return hs.count end)
-      if okn and name then
-        out[name] = (out[name] or 0) + ((okc and count) or 1)
+      local okq, quality = pcall(function() return hs.quality end)
+      local item_prototype = (okn and name) and prototypes.item[name] or nil
+      if item_prototype then
+        local okc, count = pcall(function() return hs.count end)
+        recycle:add(item_prototype, ensure_quality(okq and quality or nil), (okc and count) or 1)
       end
     end
   end
-  return out
 end
 ---有内部库存
 ---@param en LuaEntity
@@ -139,18 +150,6 @@ local MOVABLE_TYPES = {
   ["item-entity"] = true,
 }
 
-local function needs_decon_tracking(en)
-  if not (en and en.valid) then return false end
-  local et = en.type
-  if MOVABLE_TYPES[et] then return true end -- 可移动：位置会变（进出建设区域）
-  if has_inventory(en) then return true end -- 有储物格：内部物品可能从无到有变化
-  -- 非库存携带物：传送带/机械臂的运输线货物、手持物（无 inventory 但携带物会变）
-  if et == "transport-belt" or et == "underground-belt" or et == "splitter" or et == "inserter" then
-    return true
-  end
-  return false
-end
-
 -- 是否可移动（位置会变，需检测进出建设区域）。不可移动但有内容物的实体只需内容检测。
 ---comment
 ---@param en LuaEntity
@@ -160,10 +159,9 @@ local function is_movable(en)
   return MOVABLE_TYPES[en.type] ~= nil
 end
 
--- 把一个被标记拆除的实体，按类别累加进 recycle 表。
--- include_entities / include_items 控制是否计入实体本身 / 物品。
+-- 把一个被标记拆除的实体，按类别累加进 recycle 表（counter）。
 ---@param en LuaEntity
----@return table<LuaItemPrototype,table<LuaQualityPrototype ,int>>
+---@return counter
 local function recycle_entity_contents(en)
   local et = en.type
   local recycle = counter.create()
@@ -171,9 +169,10 @@ local function recycle_entity_contents(en)
   if et == "item-entity" then
     if en.stack then
       local n = en.stack.name
-      local q = en.stack.quality
-      local c = en.stack.count or 1
-      if n then recycle:add(prototypes.item[n], q, c) end
+      local item_prototype = n and prototypes.item[n] or nil
+      if item_prototype then
+        recycle:add(item_prototype, ensure_quality(en.stack.quality), en.stack.count or 1)
+      end
     end
     return recycle
   end
@@ -187,7 +186,11 @@ local function recycle_entity_contents(en)
     local tinv = en.get_inventory(inv_index)
     if not tinv then goto skip_recycle_inv end
     for _, st in pairs(tinv.get_contents()) do
-      recycle:add(prototypes.item[st.name], prototypes.quality[st.quality], st.count)
+      --LuaInventory.get_contents 返回的 quality 是品质名，需要查原型
+      local item_prototype = st and st.name and prototypes.item[st.name] or nil
+      if item_prototype then
+        recycle:add(item_prototype, ensure_quality(prototypes.quality[st.quality]), st.count or 1)
+      end
     end
     ::skip_recycle_inv::
   end
@@ -196,11 +199,55 @@ local function recycle_entity_contents(en)
   return recycle
 end
 
+-- 提取 IRP 的请求明细（供给）：counter（item -> quality -> count）。
+-- 同一物品+品质出现在多个请求里时累加（不能只保留最后一个）。
+---comment
+---@param irp LuaEntity
+---@return counter
+local function irp_requests(irp)
+  local reqs = irp and irp.item_requests
+  if not reqs then error("Can only be used if this is ItemRequestProxy") end
+  local out = counter.create()
+  for _, r in pairs(reqs) do
+    if r and r.name then
+      local item_prototype = prototypes.item[r.name]
+      if item_prototype then
+        counter.add(out, item_prototype, ensure_quality(prototypes.quality[r.quality]), r.count)
+      end
+    end
+  end
+  return out
+end
+
+-- 提取 IRP 的回收明细：counter（item -> quality -> count）。
+-- 回收来自 removal_plan：每个 plan 命名一个物品，数量 = 代理目标容器内该物品当前库存。
+-- 与原版一致：库存为 0 时按 1 计（该物品确实在回收计划中）。
+---comment
+---@param irp LuaEntity
+---@return counter
+local function irp_removals(irp)
+  local removal = irp and irp.removal_plan
+  if not removal then error("Can only be used if this is ItemRequestProxy") end
+  local out = counter.create()
+  for _, r in pairs(removal) do
+    local item_prototype = prototypes.item[r.id.name]
+    if item_prototype then
+      local quality = ensure_quality(prototypes.quality[r.id.quality])
+      for _, pos in ipairs(r.items.in_inventory) do
+        counter.add(out, item_prototype, quality, pos.count or 1)
+      end
+    end
+  end
+  return out
+end
+
 M.item_for_entity = item_for_entity
 M.item_for_tile = item_for_tile
 M.mineable_products = mineable_products
 M.needs_decon_tracking = needs_decon_tracking
 M.is_movable = is_movable
 M.recycle_entity_contents = recycle_entity_contents
+M.irp_requests = irp_requests
+M.irp_removals = irp_removals
 
 return M
