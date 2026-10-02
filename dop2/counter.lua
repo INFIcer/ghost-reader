@@ -56,4 +56,12 @@ function M.create()
     return counter:new()
 end
 
+--方法也一并导出：除了在 counter 对象上以 `obj:add(...)` 调用，还需要以
+--"函数 + 显式 self"的形式对普通表操作（例如 count_item 的分类表、合并用的临时表）：
+--`counter.add(tbl, item, quality, count)`。只导出 create 的话这些调用会是 nil。
+M.row = counter.row
+M.add = counter.add
+M.set = counter.set
+M.read = counter.read
+
 return M

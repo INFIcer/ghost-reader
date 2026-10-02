@@ -1,17 +1,60 @@
 local changes = require("__ghost-reader__/dop2/changes")
 local config = require('__ghost-reader__/dop2/config')
-local snapshot = require("__ghost-reader__/dop2/snapshot")
 local region = require("__ghost-reader__/dop2/region")
 local counter = require("__ghost-reader__/dop2/counter")
 local count_item = require("__ghost-reader__/dop2/count_item")
+
+---snapshot 模块，由入口注入（见 M.inject_snapshot）。
+---meta 与 snapshot 天然互相依赖：本模块要建/撤快照，而快照轮询要读/建元信息。
+---snapshot 在加载期 require 本模块，所以本模块不能在加载期 require 它；
+---而 Factorio 的 require 只在解析 control.lua 期间可用，运行期调用会直接报
+---"Require can't be used outside of control.lua parsing"——写成函数里延迟 require 是行不通的。
+---@type table|nil
+local snapshot_mod
+
+---@return table
+local function get_snapshot()
+    if not snapshot_mod then
+        error("meta: snapshot 模块尚未注入（入口需在 require 后调用 meta.inject_snapshot）")
+    end
+    return snapshot_mod
+end
 
 
 ---模块对外暴露部分
 local M = {}
 --================================================================================================
 
+---注入 snapshot 模块（打破 meta <-> snapshot 的循环依赖）
+---@param mod table snapshot 模块
+function M.inject_snapshot(mod)
+    snapshot_mod = mod
+end
+
 ---@type table<uint64,meta>
 local objects_meta = {}
+
+---无人机平台建设区域附近要关注的实体类型。
+---只登记这些：区域的计数表会被反复遍历重算，把树/石头/装饰这些永远不会产生
+---计数的实体也登记进来纯属浪费（一个平台的建设区域里就有上千个）。
+local COUNT_ENTITY_TYPES = { "entity-ghost", "tile-ghost", "deconstructible-tile-proxy", "item-request-proxy" }
+
+---枚举区域内需要关注的实体（虚影/地格虚影/地格代理/IRP + 已标记拆除/升级的实体）。
+---@param surface LuaSurface
+---@param area BoundingBox
+---@return LuaEntity[]
+local function find_count_entities(surface, area)
+    local found = {}
+    local function collect(filter)
+        for _, e in ipairs(surface.find_entities_filtered(filter)) do
+            found[#found + 1] = e
+        end
+    end
+    collect({ area = area, type = COUNT_ENTITY_TYPES })
+    collect({ area = area, to_be_deconstructed = true })
+    collect({ area = area, to_be_upgraded = true })
+    return found
+end
 
 --================================================================================================
 
@@ -90,7 +133,7 @@ end
 ---注册可移动
 function meta:register_movable()
     if self.movable == 0 then
-        self.tilepos_snapshot = snapshot.add_tilepos_snapshot(self.entity)
+        self.tilepos_snapshot = get_snapshot().add_tilepos_snapshot(self.entity)
     end
     self.movable = self.movable + 1
 end
@@ -99,7 +142,7 @@ end
 function meta:unregister_movable()
     self.movable = self.movable - 1
     if self.movable == 0 then
-        snapshot.remove_snapshot(self.tilepos_snapshot)
+        get_snapshot().remove_snapshot(self.tilepos_snapshot)
     end
 end
 
@@ -141,8 +184,13 @@ function meta:read_output()
     return out
 end
 
+---常量箱 section 的插槽上限（引擎硬上限：slot 索引超出会直接报错，不是静默失败）
+---注意 LuaLogisticSection::filters_count 是"当前已有多少个过滤器"，不是插槽容量，
+---不能用它判断是否写满（清空后它恒为 0）。
+local SLOTS_PER_SECTION = 1000
+
 ---读取器重写信号输出
----一个 section 的插槽（filters_count）填满时新建 section 继续填充；
+---一个 section 的插槽填满（1000 个）时新建 section 继续填充；
 ---本次用不到的旧 section 会被清空，避免残留上一次的信号。
 function meta:write_outputs()
     ---@type LuaConstantCombinatorControlBehavior
@@ -162,18 +210,18 @@ function meta:write_outputs()
     local section = nil
     for item, quality_counts in pairs(self:read_output()) do
         for quality, count in pairs(quality_counts) do
-            if (not section) or slot >= section.filters_count then
-                --当前 section 插槽已满：取下一个（没有就新建）继续填
+            --当前 section 插槽已满：取下一个（没有就新建）继续填
+            if (not section) or slot >= SLOTS_PER_SECTION then
                 section_index = section_index + 1
                 section = cb.get_section(section_index)
                 if not section then section = cb.add_section("") end
-                --已到 section 数量上限（add_section 返回 nil）或该 section 没有插槽：
-                --剩余信号无处安放，只能丢弃（至少已写入的信号是完整的）
-                if not (section and section.filters_count > 0) then return end
+                --section 数量也到上限（add_section 返回 nil）：剩余信号无处安放，
+                --只能丢弃（至少已写入的信号是完整的）
+                if not section then return end
                 slot = 0
             end
             slot = slot + 1
-            section.set_slot(slot, { value = { type = 'item', name = item.name, quality = quality }, min = count })
+            section.set_slot(slot, { value = { type = 'item', name = item.name, quality = quality.name }, min = count })
         end
     end
 end
@@ -235,29 +283,42 @@ function meta:on_destroyed()
         end
     end
     if self.irp_snapshot then
-        snapshot.remove_snapshot(self.irp_snapshot)
+        get_snapshot().remove_snapshot(self.irp_snapshot)
     end
 
     --计数实体清理
     self:clear_count_item()
     self:clear_regions()
     if self.tilepos_snapshot then
-        snapshot.remove_snapshot(self.tilepos_snapshot)
+        get_snapshot().remove_snapshot(self.tilepos_snapshot)
     end
     if self.inventory_snapshot then
-        snapshot.remove_snapshot(self.inventory_snapshot)
+        get_snapshot().remove_snapshot(self.inventory_snapshot)
     end
 
     --读取器清理
     self:reader_set_region(nil)
     --无人机平台清理(由于无人机平台删除导致归属地尺寸收缩)
+    --平台被拆会让它所在的物流网络重新分裂：引擎不会为分裂销毁任何网络对象
+    --（存活的那半沿用原 network_id，裂出去的那半是新 network_id），
+    --所以事件里查不到"网络归属地销毁"，只能由平台这一侧反推：
+    --把原网络归属地的全部成员标脏重解析。这些成员可能遍布整个原网络
+    --（如裂出去那半覆盖的实体），不是只看平台自己的建设区域。
+    if self.roboport_region then
+        for reader, _ in pairs(self.roboport_region.readers) do
+            changes.dirty_reader_region(reader)
+        end
+        for ce, _ in pairs(self.roboport_region.count_entities) do
+            changes.dirty_count_entitiy_region(ce)
+        end
+    end
     --此处实体已被摧毁（on_object_destroyed 在销毁后触发），只能用创建时保留的 surface
     if self.roboport_region and self.surface then
-        for i, e in self.surface.find_entities_filtered({ area = self.lbox, name = READER }) do
+        for _, e in ipairs(self.surface.find_entities_filtered({ area = self.lbox, name = READER })) do
             local m = M.ensure_reader_meta(e)
             changes.dirty_reader_region(m)
         end
-        for i, e in self.surface.find_entities(self.cbox) do
+        for _, e in ipairs(find_count_entities(self.surface, self.cbox)) do
             local m = M.ensure_entity_meta(e)
             changes.dirty_count_entitiy_region(m)
         end
@@ -310,11 +371,11 @@ function M.ensure_roboport_meta(port)
         m.cbox = cbox
         m.lbox = lbox
 
-        for i, e in port.surface.find_entities_filtered({ area = lbox, name = READER }) do
+        for _, e in ipairs(port.surface.find_entities_filtered({ area = lbox, name = READER })) do
             local m = M.ensure_reader_meta(e)
             m:reader_set_region(r)
         end
-        for i, e in port.surface.find_entities(cbox) do
+        for _, e in ipairs(find_count_entities(port.surface, cbox)) do
             local m = M.ensure_entity_meta(e)
             m:add_to_region(r)
         end

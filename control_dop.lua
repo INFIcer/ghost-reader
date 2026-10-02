@@ -1,9 +1,12 @@
 -- ghost-reader / control_dop.lua
 --
--- 虚影读取器（Ghost Reader）—— 面向数据编程（DOP）重构版【入口文件】。
+-- 虚影读取器（Ghost Reader）—— 面向数据编程（DOP）**旧版（dop/）入口备份**。
 --
--- 本文件是入口：按依赖顺序 require dop/ 子目录下的各功能模块，并调用
--- main.register() 完成事件注册。真正的实现拆分在 dop/*.lua：
+-- 当前生效的入口是 control.lua（指向 dop2/）。本文件保留 dop/ 版本的入口内容：
+-- 需要回退到旧实现时，把本文件的内容复制回 control.lua 即可（dop/ 目录未改动，
+-- data.lua / data-updates.lua 为两版共用，无需更换）。
+--
+-- 原 dop/ 实现拆分如下：
 --
 --   dop/constants.lua     常量与 storage 键名
 --   dop/items.lua         物品名解析与回收内容（纯辅助）
@@ -16,9 +19,6 @@
 --   dop/output.lua        幽灵读取器输出（写电路 + tooltip）
 --   dop/gui.lua           GUI（构建/渲染/事件）
 --   dop/main.lua          主管线（on_tick 主循环 + 顶层事件回调 + 生命周期）
---
--- 本文件不覆盖 control.lua。尚未切换入口（由用户确认后再替换 control.lua 或
--- 改 mod 配置指向本文件）。
 
 -- 预加载各模块（require 会按需初始化，顺序即依赖方向）
 local constants = require("__ghost-reader__/dop/constants")
