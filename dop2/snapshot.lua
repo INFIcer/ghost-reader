@@ -282,5 +282,14 @@ function M.remove_snapshots(entity)
     remove_where(function(candidate) return candidate.entity == entity end)
 end
 
+---清空所有快照（全量重建时用）。快照依附实体，会随世界状态重新建立。
+function M.reset()
+    for _, queue in ipairs(queues) do
+        queue.todo = {}
+        queue.curr = {}
+        queue.prev = {}
+    end
+end
+
 M.on_tick = on_tick
 return M

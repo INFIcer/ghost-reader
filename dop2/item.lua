@@ -119,11 +119,14 @@ end
 --   * 环境实体（树/岩石/鱼等，无 items_to_place_this，产物来自 mineable_properties）；
 --   * 有储物格，或传送带/机械臂这类把货物放在运输线/手持栈上（而非库存里）的实体。
 -- 静态建筑（墙/管道/灯等）三种都不满足，内容物恒为空，不必建快照。
+-- 地格代理（deconstructible-tile-proxy）单独排除：它只代表"地格被标记拆除"，
+-- 自身没有任何内容物，大范围拆地格时给它建快照纯属浪费。
 ---@param en LuaEntity
 ---@return boolean
 local function has_countable_contents(en)
   if not (en and en.valid) then return false end
   local et = en.type
+  if et == "deconstructible-tile-proxy" then return false end
   if et == "item-entity" then return true end
   --环境实体没有可放置物品，其"内容物"是挖掘产物
   if not item_for_entity(en.name) then return true end

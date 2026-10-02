@@ -18,7 +18,7 @@
 
 local changes = require("__ghost-reader__/dop2/changes")
 local config = require("__ghost-reader__/dop2/config")
-local meta = require("meta")
+local meta = require("__ghost-reader__/dop2/meta")
 local bplib = require("__ghost-reader__/dop2/bplib")
 
 ---模块对外暴露部分

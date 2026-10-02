@@ -8,6 +8,8 @@ COUNT_DECON_ENTITY = "deconstruction-entity"        --被拆实体本身（同�
 ---@type string
 COUNT_DECON_INVENTORY = "deconstruction-inventory"  --被拆实体携带的物品
 ---@type string
+COUNT_DECON_TILE = "deconstruction-tile"            --被拆地格（地格类别回收；由 deconstructible-tile-proxy 代表）
+---@type string
 COUNT_IRP_PREFIX = "irp"                            --IRP 计数项前缀（后接 IRP 的注册号）
 
 ---品质筛选的"全部"取值。品质筛选的其余取值是品质原型名（LuaQualityPrototype.name）。

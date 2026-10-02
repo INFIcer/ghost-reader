@@ -346,4 +346,10 @@ function M.remove_meta(reg_num)
     m:on_destroyed()
 end
 
+---清空元信息注册表（全量重建时用）。
+---元信息依附实体，会随世界状态重新登记；引擎侧的销毁注册是幂等的，不受影响。
+function M.reset()
+    objects_meta = {}
+end
+
 return M

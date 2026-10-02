@@ -61,29 +61,56 @@ local function on_surface_created(event)
     region.ensure_region_surface(game.surfaces[event.surface_index])
 end
 
----@param event EventData.on_marked_for_deconstruction
-local function on_deconstruction(event)
-    local m = meta.ensure_entity_meta(event.entity)
+---登记一个被标记拆除的目标。按类别分开存计数项：
+---  * 地格代理（deconstructible-tile-proxy）：它代表"某格地格被标记拆除"，
+---    只有地格类别的回收（地格 → 可放置该地格的物品），单独一个计数项；
+---  * 普通实体本身：实体类别回收（这个计数项同时充当"已标记拆除"的判据）；
+---  * 实体携带的物品：交给内容物快照（创建即算一次，之后由轮询跟踪变化）。
+---事件处理与全量重建共用本函数，保证两条路径登记出的状态完全一致。
+---@param entity LuaEntity
+local function apply_deconstruction(entity)
+    if not (entity and entity.valid) then return end
+    local m = meta.ensure_entity_meta(entity)
+
+    --地格代理：自身没有实体物品、也没有内容物，只有地格回收
+    if entity.type == "deconstructible-tile-proxy" then
+        local position = entity.position
+        local tile = entity.surface.get_tile(math.floor(position.x), math.floor(position.y))
+        m:set_count_item(COUNT_DECON_TILE,
+            change_type.TILE_RECYCLE,
+            tile and item.item_for_tile(tile.name),
+            nil,
+            1)
+        return
+    end
+
     --被拆实体本身记为实体类别回收（这个计数项同时充当"已标记拆除"的判据）
     m:set_count_item(COUNT_DECON_ENTITY,
         change_type.ENTITY_RECYCLE,
-        item.item_for_entity(m.entity.name),
-        m.entity.quality,
+        item.item_for_entity(entity.name),
+        entity.quality,
         1)
-    if item.is_movable(m.entity) then
+    if item.is_movable(entity) then
         m:register_movable()
     end
     --实体携带的物品交给内容物快照：快照创建时就会立刻算一次并写入
     --'deconstruction-inventory'，之后内容变化（机器人搬走）由轮询增量更新
-    if item.has_countable_contents(m.entity) then
-        m.inventory_snapshot = snapshot.add_inventory_snapshot(m.entity)
+    if item.has_countable_contents(entity) then
+        m.inventory_snapshot = snapshot.add_inventory_snapshot(entity)
     end
 end
+
+---@param event EventData.on_marked_for_deconstruction
+local function on_deconstruction(event)
+    apply_deconstruction(event.entity)
+end
+
 ---@param event EventData.on_cancelled_deconstruction
 local function on_cancel_deconstruction(event)
     local m = meta.ensure_entity_meta(event.entity)
     m:remove_count_item(COUNT_DECON_ENTITY)
     m:remove_count_item(COUNT_DECON_INVENTORY)
+    m:remove_count_item(COUNT_DECON_TILE)
     if m.movable > 0 then
         m:unregister_movable()
     end
@@ -94,13 +121,26 @@ local function on_cancel_deconstruction(event)
     end
 end
 
+---登记一个被标记升级的实体：升级目标记为"升级类别供给"，实体自身记为"升级类别回收"。
+---目标从实体自身取（entity.get_upgrade_target()，返回新实体原型 + 新品质），
+---而不是用事件字段：事件里的 previous_target 是可选的，且全量重建时根本没有事件。
+---事件处理与全量重建共用本函数。
+---@param entity LuaEntity
+local function apply_upgrade(entity)
+    if not (entity and entity.valid) then return end
+    local m = meta.ensure_entity_meta(entity)
+    local target, target_quality = entity.get_upgrade_target()
+    m:set_count_item('upgrade', change_type.UPGRADE_SUPPLY,
+        target and item.item_for_entity(target.name),
+        target_quality, 1)
+    m:set_count_item('upgrade', change_type.UPGRADE_RECYCLE,
+        item.item_for_entity(entity.name),
+        entity.quality, 1)
+end
+
 ---@param event EventData.on_marked_for_upgrade
 local function on_upgrade(event)
-    local m = meta.ensure_entity_meta(event.entity)
-    m:set_count_item('upgrade', change_type.UPGRADE_SUPPLY, item.item_for_entity(event.target.name), event.entity
-        .quality, 1)
-    m:set_count_item('upgrade', change_type.UPGRADE_RECYCLE, item.item_for_entity(event.previous_target.name),
-        event.entity.quality, 1)
+    apply_upgrade(event.entity)
 end
 
 ---@param event EventData.on_cancelled_upgrade
@@ -110,30 +150,147 @@ local function on_cancel_upgrade(event)
 end
 
 
+---登记一个 IRP（物品请求代理）：把它的请求/回收记成目标容器上的计数项，
+---并建立 IRP 快照跟踪后续变化（请求被部分供应）。事件处理与全量重建共用本函数。
+---@param irp LuaEntity
+local function apply_irp(irp)
+    if not (irp and irp.valid and irp.type == "item-request-proxy") then return end
+    local irp_meta = meta.ensure_entity_meta(irp)
+
+    local target = irp.proxy_target --请求容器实体
+
+    if target and target.valid then
+        local m = meta.ensure_entity_meta(target)
+        irp_meta.proxy_target = m
+        --IRP 快照：创建时立刻算一次并写入目标容器上的 'irpN' 计数项，
+        --之后请求被部分供应（item_requests 收缩）由轮询增量更新
+        irp_meta.irp_snapshot = snapshot.add_irp_snapshot(irp)
+        if item.is_movable(m.entity) then
+            m:register_movable()
+        end
+    end
+end
+
 ---@param event EventData.on_script_trigger_effect
 local function on_irp_created(event)
     if event.effect_id ~= "gr-item-request-proxy" then return end
-    local e = event.source_entity
-    if e and e.valid and e.type == "item-request-proxy" then
-        local irp_meta = meta.ensure_entity_meta(e)
+    apply_irp(event.source_entity)
+end
 
-        local target = e.proxy_target --请求容器实体
 
-        if target and target.valid then
-            local m = meta.ensure_entity_meta(target)
-            irp_meta.proxy_target = m
-            --IRP 快照：创建时立刻算一次并写入目标容器上的 'irpN' 计数项，
-            --之后请求被部分供应（item_requests 收缩）由轮询增量更新
-            irp_meta.irp_snapshot = snapshot.add_irp_snapshot(e)
-            if item.is_movable(m.entity) then
-                m:register_movable()
+---读档后是否需要全量重建。
+---on_load 里 game 不可用、也不允许改 storage，所以只能置这个模块级标志，
+---由读档后的第一个 on_tick 执行（与 dop1 的 needs_rebuild_after_load 同一思路）。
+local needs_rebuild = false
+
+--================================================================================================
+-- 初始化与全量重建
+--================================================================================================
+
+---全量重建：先清空各模块的注册表，再按当前世界状态重新登记一遍。
+---触发时机：
+---  1. 读档（见 needs_rebuild）——objects_meta / regions / 快照队列 / changes 都是模块局部
+---     变量，读档时随 control.lua 重跑而清空，必须重建，否则读档后什么都不统计；
+---  2. 配置变化（on_configuration_changed，含本 mod 版本变化）。
+---登记顺序沿用 dop1：平台 → 读取器 → 虚影（实体/地格）→ 升级标记 → 拆除标记 → IRP。
+---登记动作一律复用事件处理层的函数，保证"重建出来的状态"与"事件驱动出来的状态"一致。
+---引擎侧的 register_on_object_destroyed 是幂等的（同一对象返回同一注册号），
+---所以重建只是重新建立我们这边的元信息，不影响销毁事件的投递。
+function M.rebuild()
+    --1) 清空模块级注册表
+    meta.reset()
+    region.reset()
+    snapshot.reset()
+    changes.clear()
+
+    --2) 表面归属地（顺带完成销毁注册，供 on_object_destroyed 回收）
+    for _, surface in pairs(game.surfaces) do
+        region.ensure_region_surface(surface)
+    end
+
+    --3) 无人机平台：登记平台元信息，并标脏其范围内的读取器/计数实体
+    for _, surface in pairs(game.surfaces) do
+        for _, port in ipairs(surface.find_entities_filtered({ name = "roboport" })) do
+            if port.valid then
+                meta.ensure_roboport_meta(port)
+            end
+        end
+    end
+
+    --4) 幽灵读取器
+    for _, surface in pairs(game.surfaces) do
+        for _, reader in ipairs(surface.find_entities_filtered({ name = READER })) do
+            if reader.valid then
+                meta.ensure_reader_meta(reader)
+            end
+        end
+    end
+
+    --5) 虚影：实体虚影（含读取器虚影，它与事件路径一致地记为实体类别供给）与地格虚影
+    for _, surface in pairs(game.surfaces) do
+        for _, ghost in ipairs(surface.find_entities_filtered({ type = "entity-ghost" })) do
+            if ghost.valid then
+                on_entity_ghost_built(ghost)
+            end
+        end
+        for _, ghost in ipairs(surface.find_entities_filtered({ type = "tile-ghost" })) do
+            if ghost.valid then
+                on_tile_ghost_built(ghost)
+            end
+        end
+    end
+
+    --6) 升级标记
+    for _, surface in pairs(game.surfaces) do
+        for _, entity in ipairs(surface.find_entities_filtered({ to_be_upgraded = true })) do
+            apply_upgrade(entity)
+        end
+    end
+
+    --7) 拆除标记
+    for _, surface in pairs(game.surfaces) do
+        for _, entity in ipairs(surface.find_entities_filtered({ to_be_deconstructed = true })) do
+            apply_deconstruction(entity)
+        end
+    end
+
+    --7.5) 地格拆除：被标记拆除的地格由 deconstructible-tile-proxy 代表，是否会被上面那句
+    --      to_be_deconstructed 查询命中并不确定，故再显式枚举一次代理实体。
+    --      apply_deconstruction 对代理是幂等的（只是覆盖同一个计数项），重复处理无害。
+    for _, surface in pairs(game.surfaces) do
+        for _, proxy in ipairs(surface.find_entities_filtered({ type = "deconstructible-tile-proxy" })) do
+            apply_deconstruction(proxy)
+        end
+    end
+
+    --8) IRP：重建目标容器上的计数项与快照
+    for _, surface in pairs(game.surfaces) do
+        for _, irp in ipairs(surface.find_entities_filtered({ type = "item-request-proxy" })) do
+            if irp.valid and irp.unit_number then
+                apply_irp(irp)
             end
         end
     end
 end
 
+---@param _ EventData.on_configuration_changed
+local function on_configuration_changed(_)
+    M.rebuild()
+end
+
+---@param _ EventData.on_load
+local function on_load(_)
+    --此处不能访问 game、也不能改 storage，只置标志
+    needs_rebuild = true
+end
 
 local function on_tick()
+    --0) 读档后的首帧：注册表已随 control.lua 重跑清空，先做一次全量重建
+    if needs_rebuild then
+        needs_rebuild = false
+        M.rebuild()
+    end
+
     --快照触发计时实体归属地脏、计时实体计数脏（库存变化引发）
     snapshot.on_tick()
 
@@ -257,6 +414,10 @@ function M.register()
     if defines.events.on_entity_settings_pasted then
         script.on_event(defines.events.on_entity_settings_pasted, paste.on_settings_pasted)
     end
+
+    -- 生命周期：读档（on_load 只置标志，首帧重建）与配置变化（直接重建）
+    script.on_load(on_load)
+    script.on_configuration_changed(on_configuration_changed)
 end
 
 return M
