@@ -69,6 +69,14 @@ function count_item:read(kind, item, quality)
     return counter.read(item_counts, item, ensure_quality(quality))
 end
 
+---用给定计数器整体替换某个类别的计数（替换而非累加）。
+---用于"重算整份计数"的场景（如快照重新统计实体携带的物品）。
+---@param kind change_type
+---@param c counter|nil 为 nil 表示清空该类别
+function count_item:replace(kind, c)
+    self[kind] = c
+end
+
 ---模块对外暴露部分
 local M = {}
 

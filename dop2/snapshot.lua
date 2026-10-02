@@ -1,89 +1,154 @@
-local meta = require("meta")
+-- dop2/snapshot.lua
+--
+-- 虚影读取器（Ghost Reader）DOP 重构 —— 指纹快照轮询。
+--
+-- 有些变化没有原生事件：实体被拖走、内部储存物被机器人逐步搬走、IRP 的请求被部分
+-- 供应。这里用「快照 + 指纹」在 on_tick 里分批轮询（每 tick 只查 max_check 个，
+-- round-robin），指纹变化时才做事：
+--   * 内容物快照  物品计数用 counter，指纹变化即整体替换 'deconstruction-inventory'；
+--   * 位置快照    实体所在格点，指纹变化即标该实体的归属地脏（可能进出建设区域）；
+--   * IRP 快照    请求/回收明细各一个 counter，指纹变化即整体替换目标容器上的 'irpN'。
+--
+-- 快照创建时立刻跑一次 update（previous = nil），所以「创建即完成首次计数」：
+-- 事件处理层只负责建快照，不需要自己写这些计数项。
+--
+-- 计数项更新与标脏由各 update 函数自己完成——只有它知道变化影响的是哪个 meta
+-- （例如 IRP 的计数项记在目标容器上，要标脏的是目标容器）。
+
 local changes = require("__ghost-reader__/dop2/changes")
+local item = require("__ghost-reader__/dop2/item")
+local meta = require("__ghost-reader__/dop2/meta")
 
 local active_unchecked = {}
 local active_checked = {}
 local inactive_unchecked = {}
 local inactive_checked = {}
 
+---每 tick 最多检查的快照数
+local max_check = 8
+---连续多少次无变化后转入不活跃组（查得更稀）
+local inactive_times = 30
+
 ---@class snapshot
 ---@field entity LuaEntity
----@field update_mod function
----@field snaps string
----@field checks int
+---@field update_mod fun(entity: LuaEntity, previous: string|nil): string 更新函数：返回指纹，变化时自行更新计数项/标脏
+---@field snaps string 上一次的指纹
+---@field checks int 连续无变化的次数
 local snapshot = {}
 
+--================================================================================================
+-- 指纹
+--================================================================================================
 
----@param inventory LuaInventory
+---把计数器压成稳定的指纹字符串（键排序后拼接）。
+---计数与指纹同源（都来自同一个 counter），故指纹变了就等于计数变了。
+---@param c counter
 ---@return string
-local function generate_inventory_snapshot(inventory)
+local function counter_fingerprint(c)
     local parts = {}
-    for _, c in ipairs(inventory.get_contents()) do
-        table.insert(parts, tostring(c.name) .. "-" .. tostring(c.quality) .. "=" .. tostring(c.count))
+    for item_prototype, quality_counts in pairs(c) do
+        for quality, count in pairs(quality_counts) do
+            parts[#parts + 1] = item_prototype.name .. ":" .. quality.name .. "=" .. tostring(count)
+        end
     end
     table.sort(parts)
     return table.concat(parts, ";")
 end
 
+---位置指纹。用格点而非浮点：进出建设区域只取决于所在格点，
+---同格内微移不应触发归属地重算。
 ---@param position MapPosition
 ---@return string
-local function generate_tilepos_snapshot(position)
-    local tile_x = math.floor(position.x)
-    local tile_y = math.floor(position.y)
-    return tostring(tile_x) .. "," .. tostring(tile_y)
+local function position_fingerprint(position)
+    return tostring(math.floor(position.x)) .. "," .. tostring(math.floor(position.y))
 end
 
+--================================================================================================
+-- 快照更新函数
+--================================================================================================
+
+---把计数器整体写进某个实体的某个计数项的某个类别（替换而非累加）
 ---@param entity LuaEntity
-local function update_inventories(entity)
-    local parts = {}
-    for inv_index in 1, entity.get_max_inventory_index() do
-        local tinv = entity.get_inventory(inv_index)
-        if tinv then
-            table.insert(parts, generate_inventory_snapshot(tinv))
+---@param name string 计数项名
+---@param kind change_type
+---@param c counter
+local function replace_count_item(entity, name, kind, c)
+    local m = meta.ensure_entity_meta(entity)
+    m:get_count_item(name):replace(kind, c)
+    changes.dirty_count_entitiy_output(m)
+end
+
+---内容物快照：把实体当前携带的物品（库存/传送带货物/机械臂手持物/挖掘产物）
+---算成一个 counter，指纹变化时整体替换 'deconstruction-inventory'
+---@param entity LuaEntity
+---@param previous string|nil
+---@return string
+local function update_inventories(entity, previous)
+    local contents = item.recycle_entity_contents(entity)
+    local fingerprint = counter_fingerprint(contents)
+    if fingerprint ~= previous then
+        replace_count_item(entity, COUNT_DECON_INVENTORY, change_type.ITEM_RECYCLE, contents)
+    end
+    return fingerprint
+end
+
+---位置快照：指纹变化说明实体换格了（可能进出建设区域），标该实体归属地脏
+---@param entity LuaEntity
+---@param previous string|nil
+---@return string
+local function update_pos(entity, previous)
+    local fingerprint = position_fingerprint(entity.position)
+    if fingerprint ~= previous then
+        changes.dirty_count_entitiy_region(meta.ensure_entity_meta(entity))
+    end
+    return fingerprint
+end
+
+---IRP 快照：把 IRP 当前的请求（供给）与回收明细各算成一个 counter，
+---指纹变化时整体替换目标容器上的 'irpN' 计数项。
+---计数项记在目标容器上：IRP 自身没有归属地，容器被拖走由容器自己的位置快照负责。
+---@param irp LuaEntity
+---@param previous string|nil
+---@return string
+local function update_irp(irp, previous)
+    local requests = item.irp_requests(irp)
+    local removals = item.irp_removals(irp)
+    local fingerprint = counter_fingerprint(requests) .. "|" .. counter_fingerprint(removals)
+    if fingerprint ~= previous then
+        local irp_meta = meta.get_meta_of(irp)
+        local target = irp.proxy_target --请求容器实体
+        if irp_meta and target and target.valid then
+            local m = meta.ensure_entity_meta(target)
+            local ci = m:get_count_item(COUNT_IRP_PREFIX .. tostring(irp_meta.reg_num))
+            ci:replace(change_type.ITEM_SUPPLY, requests)
+            ci:replace(change_type.ITEM_RECYCLE, removals)
+            changes.dirty_count_entitiy_output(m)
         end
     end
-    return table.concat(parts, "\n")
+    return fingerprint
 end
 
----@param entity LuaEntity
-local function update_pos(entity)
-    return generate_tilepos_snapshot(entity.position)
-end
+--================================================================================================
+-- 轮询
+--================================================================================================
 
 ---comment
----@param snapshot snapshot
-local function check(snapshot)
-    if snapshot.entity and snapshot.entity.valid then
-        local new = snapshot.update_mod(snapshot.entity)
-        if snapshot.snaps ~= new then
-            snapshot.snaps = new
-            if snapshot.update_mod == update_inventories then
-                --库存变化 引发计数脏
-                changes.dirty_count_entitiy_output(meta.ensure_entity_meta(snapshot.entity))
-            else
-                --位移 引发归属地脏
-                changes.dirty_count_entitiy_region(meta.ensure_entity_meta(snapshot.entity))
-            end
+---@param ss snapshot
+local function check(ss)
+    if ss.entity and ss.entity.valid then
+        local new = ss.update_mod(ss.entity, ss.snaps)
+        if ss.snaps ~= new then
+            ss.snaps = new
+            --内容变了：回到活跃组，接下来查得更密
+            ss.checks = 0
         else
-            snapshot.checks = snapshot.checks + 1
+            ss.checks = ss.checks + 1
         end
     end
 end
 
----@param entity LuaEntity
-function snapshot:new(entity, update_mod)
-    local obj = {}
-    obj.entity = entity
-    obj.update_mod = update_mod
-    obj.snaps = update_mod(entity)
-    obj.checks = 0
-    setmetatable(obj, { __index = self })
-    return obj
-end
-
-max_check = 8
-inactive_times = 30
-function on_tick()
+---运行一轮检查（每 tick 最多 max_check 个，先活跃组后不活跃组）
+local function on_tick()
     local i = 0
     local swap = false
     while i < max_check do
@@ -95,7 +160,7 @@ function on_tick()
                 swap = true
             end
         end
-        ss = table.remove(active_unchecked, 1)
+        local ss = table.remove(active_unchecked, 1)
         check(ss)
         if ss.checks >= inactive_times then
             table.insert(inactive_checked, ss)
@@ -114,7 +179,7 @@ function on_tick()
                 swap = true
             end
         end
-        ss = table.remove(inactive_unchecked, 1)
+        local ss = table.remove(inactive_unchecked, 1)
         check(ss)
         if ss.checks == 0 then
             table.insert(active_checked, ss)
@@ -125,9 +190,27 @@ function on_tick()
     end
 end
 
+--================================================================================================
+-- 模块对外暴露部分
+--================================================================================================
+
 local M = {}
 
----comment
+---@param entity LuaEntity
+---@param update_mod fun(entity: LuaEntity, previous: string|nil): string
+---@return snapshot
+function snapshot:new(entity, update_mod)
+    local obj = {}
+    obj.entity = entity
+    obj.update_mod = update_mod
+    obj.checks = 0
+    setmetatable(obj, { __index = self })
+    --创建时先跑一次（previous 为 nil）：创建即完成首次计数
+    obj.snaps = update_mod(entity, nil)
+    return obj
+end
+
+---内容物快照（拆除/库存变化跟踪）
 ---@param entity LuaEntity
 ---@return snapshot
 function M.add_inventory_snapshot(entity)
@@ -136,10 +219,20 @@ function M.add_inventory_snapshot(entity)
     return ss
 end
 
+---位置快照（实体移动跟踪）
 ---@param entity LuaEntity
 ---@return snapshot
 function M.add_tilepos_snapshot(entity)
     local ss = snapshot:new(entity, update_pos)
+    table.insert(active_unchecked, ss)
+    return ss
+end
+
+---IRP 快照（请求/回收明细变化跟踪）
+---@param irp LuaEntity
+---@return snapshot
+function M.add_irp_snapshot(irp)
+    local ss = snapshot:new(irp, update_irp)
     table.insert(active_unchecked, ss)
     return ss
 end
@@ -155,12 +248,12 @@ local function remove_snapshot_in_list(list, entity)
     end
 end
 
----@param snapshot snapshot
-function M.remove_snapshot(snapshot)
-    remove(active_unchecked, snapshot)
-    remove(active_checked, snapshot)
-    remove(inactive_unchecked, snapshot)
-    remove(inactive_checked, snapshot)
+---@param ss snapshot
+function M.remove_snapshot(ss)
+    remove(active_unchecked, ss)
+    remove(active_checked, ss)
+    remove(inactive_unchecked, ss)
+    remove(inactive_checked, ss)
 end
 
 ---@param entity LuaEntity

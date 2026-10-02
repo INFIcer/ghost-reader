@@ -73,9 +73,11 @@ function region:update_count()
     for meta, _ in pairs(self.count_entities) do
         local count_items = meta.count_items
         if count_items then
-            local deconstruction_mark = count_items.deconstruction
+            --实体本身已被标记拆除时，它在目标容器上留下的 IRP 计数项要跳过
+            --（拆除后请求已作废，留着会与实体回收重复计）
+            local deconstruction_mark = count_items[COUNT_DECON_ENTITY]
             for name, item_count in pairs(count_items) do
-                if deconstruction_mark and has_prefix(name, 'irp') then
+                if deconstruction_mark and has_prefix(name, COUNT_IRP_PREFIX) then
                     --有销毁标志时跳过irp统计
                 else
                     for kind, item_counts in pairs(item_count) do

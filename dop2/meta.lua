@@ -22,8 +22,7 @@ local objects_meta = {}
 ---@field surface LuaSurface 实体所在表面（实体摧毁后 entity 不可用，故单独保留）
 ---@field movable int 可移动注册次数，仅在可移动的计数实体上使用
 ---@field tilepos_snapshot snapshot|nil 位置快照，仅在可移动的计数实体上使用
----@field inventory int 库存注册次数，仅在有内部库存的计数实体上使用
----@field inventory_snapshot snapshot|nil 库存快照，仅在有内部库存的计数实体上使用
+---@field inventory_snapshot snapshot|nil 内容物快照，仅在被标记拆除且有内容物的实体上使用
 ---@field count_items table<string,count_item> 计数项，仅在计数实体上可访问
 ---@field proxy_target meta 请求容器实体的元数据，仅在IRP上可访问
 ---@field reader_region region 读取器所在归属地，仅在读取器上可访问
@@ -31,6 +30,7 @@ local objects_meta = {}
 ---@field cbox BoundingBox 平台的建设范围，仅在无人机平台上可访问
 ---@field lbox BoundingBox 平台的物流范围，仅在无人机平台上可访问
 ---@field count_entity_regions table<region,any> 计数实体所在归属地，仅在计数实体上可访问
+---@field irp_snapshot snapshot|nil IRP 快照，仅在IRP上可访问
 local meta = {}
 
 ---@param reg_num uint64 注册号
@@ -43,7 +43,6 @@ function meta:new(reg_num, entity)
         unit = entity.unit_number,
         surface = entity.surface,
         movable = 0,
-        inventory = 0,
     }
     setmetatable(obj, { __index = self })
     return obj
@@ -101,22 +100,6 @@ function meta:unregister_movable()
     self.movable = self.movable - 1
     if self.movable == 0 then
         snapshot.remove_snapshot(self.tilepos_snapshot)
-    end
-end
-
----注册库存检测
-function meta:register_inventory()
-    if self.inventory == 0 then
-        self.inventory_snapshot = snapshot.add_inventory_snapshot(self.entity)
-    end
-    self.inventory = self.inventory + 1
-end
-
----取消注册库存检测
-function meta:unregister_inventory()
-    self.inventory = self.inventory - 1
-    if self.inventory == 0 then
-        snapshot.remove_snapshot(self.inventory_snapshot)
     end
 end
 
@@ -243,13 +226,16 @@ function meta:clear_regions()
 end
 
 function meta:on_destroyed()
-    --IRP清理
+    --IRP清理：它在目标容器上留下的计数项与轮询快照都要撤掉
     if self.proxy_target then
-        self.proxy_target:remove_count_item('irp' .. tostring(self.reg_num))
+        self.proxy_target:remove_count_item(COUNT_IRP_PREFIX .. tostring(self.reg_num))
         changes.dirty_count_entitiy_output(self.proxy_target)
         if self.proxy_target.movable > 0 then
             self.proxy_target:unregister_movable()
         end
+    end
+    if self.irp_snapshot then
+        snapshot.remove_snapshot(self.irp_snapshot)
     end
 
     --计数实体清理

@@ -113,30 +113,34 @@ local function extra_carry_items(en, recycle)
     end
   end
 end
----有内部库存
+-- 实体是否可能有"可计数的内容物"（决定被标拆除时是否需要建内容物快照）。
+-- 与 recycle_entity_contents 的分支一一对应：
+--   * 落地物品（item-entity）；
+--   * 环境实体（树/岩石/鱼等，无 items_to_place_this，产物来自 mineable_properties）；
+--   * 有储物格，或传送带/机械臂这类把货物放在运输线/手持栈上（而非库存里）的实体。
+-- 静态建筑（墙/管道/灯等）三种都不满足，内容物恒为空，不必建快照。
 ---@param en LuaEntity
 ---@return boolean
-local function has_inventory(en)
+local function has_countable_contents(en)
+  if not (en and en.valid) then return false end
+  local et = en.type
+  if et == "item-entity" then return true end
+  --环境实体没有可放置物品，其"内容物"是挖掘产物
+  if not item_for_entity(en.name) then return true end
   --有储物格
   for i = 1, en.get_max_inventory_index() do
     local ok, inv = pcall(function() return en.get_inventory(i) end)
     if ok and inv then return true end
   end
-  --传送带或机械臂
-  local et = en.type
+  --传送带/地下传送带/分流器/机械臂：货物在运输线或手持栈上，不在库存里
   if et == "transport-belt" or et == "underground-belt" or et == "splitter" or et == "inserter" then
     return true
   end
   return false
 end
 
--- 判断实体是否需要"动态拆除跟踪"（即记录到 DECON_MOVERS 供 poll_decon_movers 每帧
--- 检测位置/内容物变化）。仅在下列情况才需要：
---   * 可能移动（列车车厢/汽车/蜘蛛机甲等被拖走 → 改变回收计数归属）；或
---   * 可能携带内容物（库存/模块/传送带货物/机械臂手持物 → 拆除过程中内容逐步搬走）。
--- 对既不能移动又无内容的静态建筑（管道/灯/墙等），跳过跟踪可避免为海量实体做无效轮询。
--- 移动判定用实体 type（无原型可读的 movable 字段）：rolling-stock / car / spider-vehicle /
--- character 等。内容判定沿用 recycle_entity_contents 依赖的类型。
+-- 可能移动的实体类型：位置会变（被拖走/开走 → 进出建设区域，回收计数归属也跟着变）。
+-- 用实体 type 判定，原型上没有可读的 movable 字段。
 local MOVABLE_TYPES = {
   ["rolling-stock"] = true,
   ["car"] = true,
@@ -244,7 +248,7 @@ end
 M.item_for_entity = item_for_entity
 M.item_for_tile = item_for_tile
 M.mineable_products = mineable_products
-M.needs_decon_tracking = needs_decon_tracking
+M.has_countable_contents = has_countable_contents
 M.is_movable = is_movable
 M.recycle_entity_contents = recycle_entity_contents
 M.irp_requests = irp_requests

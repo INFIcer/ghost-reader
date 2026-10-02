@@ -1,6 +1,6 @@
-local region = require("region")
-local meta = require("meta")
-local item = require("item")
+local region = require("__ghost-reader__/dop2/region")
+local meta = require("__ghost-reader__/dop2/meta")
+local item = require("__ghost-reader__/dop2/item")
 local config = require("__ghost-reader__/dop2/config")
 local changes = require("__ghost-reader__/dop2/changes")
 local snapshot = require("__ghost-reader__/dop2/snapshot")
@@ -69,35 +69,34 @@ end
 ---@param event EventData.on_marked_for_deconstruction
 local function on_deconstruction(event)
     local m = meta.ensure_entity_meta(event.entity)
-    m:set_count_item('deconstruction',
+    --被拆实体本身记为实体类别回收（这个计数项同时充当"已标记拆除"的判据）
+    m:set_count_item(COUNT_DECON_ENTITY,
         change_type.ENTITY_RECYCLE,
         item.item_for_entity(m.entity.name),
         m.entity.quality,
         1)
-    --实体携带的物品（库存/传送带货物/机械臂手持物/挖掘产物）逐个记为物品类别回收
-    for recycle_item, quality_counts in pairs(item.recycle_entity_contents(m.entity)) do
-        for quality, count in pairs(quality_counts) do
-            m:set_count_item('deconstruction', change_type.ITEM_RECYCLE, recycle_item, quality, count)
-        end
-    end
     if item.is_movable(m.entity) then
         m:register_movable()
     end
-    if item.has_inventory(m.entity) then
-        m:register_inventory()
+    --实体携带的物品交给内容物快照：快照创建时就会立刻算一次并写入
+    --'deconstruction-inventory'，之后内容变化（机器人搬走）由轮询增量更新
+    if item.has_countable_contents(m.entity) then
+        m.inventory_snapshot = snapshot.add_inventory_snapshot(m.entity)
     end
 end
 ---@param event EventData.on_cancelled_deconstruction
 local function on_cancel_deconstruction(event)
     local m = meta.ensure_entity_meta(event.entity)
-    m:remove_count_item('deconstruction')
+    m:remove_count_item(COUNT_DECON_ENTITY)
+    m:remove_count_item(COUNT_DECON_INVENTORY)
     if m.movable > 0 then
         m:unregister_movable()
     end
-    if m.inventory > 0 then
-        m:unregister_inventory()
+    --内容物快照与本事件成对出现（只有拆除标记会建它），直接撤掉即可
+    if m.inventory_snapshot then
+        snapshot.remove_snapshot(m.inventory_snapshot)
+        m.inventory_snapshot = nil
     end
-    -- set_count_item(m, 'self', change_type.ENTITY_RECYCLE, item.item_for_entity(event.entity.name), 0)
 end
 
 ---@param event EventData.on_marked_for_upgrade
@@ -128,17 +127,9 @@ local function on_irp_created(event)
         if target and target.valid then
             local m = meta.ensure_entity_meta(target)
             irp_meta.proxy_target = m
-            local count_item_name = 'irp' .. tostring(irp_meta.reg_num)
-            for item_prototype, quality_counts in pairs(item.irp_requests(e)) do
-                for quality, count in pairs(quality_counts) do
-                    m:set_count_item(count_item_name, change_type.ITEM_SUPPLY, item_prototype, quality, count)
-                end
-            end
-            for item_prototype, quality_counts in pairs(item.irp_removals(e)) do
-                for quality, count in pairs(quality_counts) do
-                    m:set_count_item(count_item_name, change_type.ITEM_RECYCLE, item_prototype, quality, count)
-                end
-            end
+            --IRP 快照：创建时立刻算一次并写入目标容器上的 'irpN' 计数项，
+            --之后请求被部分供应（item_requests 收缩）由轮询增量更新
+            irp_meta.irp_snapshot = snapshot.add_irp_snapshot(e)
             if item.is_movable(m.entity) then
                 m:register_movable()
             end

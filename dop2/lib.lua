@@ -1,6 +1,15 @@
 ---@type string
 READER = "ghost-reader"
 
+--计数项名（meta.count_items 的键）。meta/region/snapshot/events 共用，集中在此避免各处拼错。
+--名字里带连字符，不能用点号取值，必须用 [] 索引。
+---@type string
+COUNT_DECON_ENTITY = "deconstruction-entity"        --被拆实体本身（同时用作"已标记拆除"的判据）
+---@type string
+COUNT_DECON_INVENTORY = "deconstruction-inventory"  --被拆实体携带的物品
+---@type string
+COUNT_IRP_PREFIX = "irp"                            --IRP 计数项前缀（后接 IRP 的注册号）
+
 --- 共享的空集合。比较过程只读传入的集合，故复用安全。
 local EMPTY_SET = {}
 

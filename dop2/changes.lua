@@ -11,10 +11,10 @@ local changes = {}
 ---comment
 ---@return changes
 function changes:new()
-    obj = {
+    local obj = {
         dirty_readers_region = {},
         dirty_readers_output = {},
-        dirty_count_entities = {},
+        dirty_count_entities_region = {},
         dirty_count_entities_output = {},
         dirty_regions_output = {}
     }
@@ -36,16 +36,16 @@ function M.dirty_reader_output(reader)
     current_changes.dirty_readers_output[reader] = true
 end
 
----标记计数实体计数脏
+---标记计数实体计数脏（由计数变化引发：需要把计数污染到所在归属地）
 ---@param count_entity meta
 function M.dirty_count_entitiy_output(count_entity)
-    current_changes.dirty_count_entities_region[count_entity] = true
+    current_changes.dirty_count_entities_output[count_entity] = true
 end
 
----标记计数实体归属地脏
+---标记计数实体归属地脏（由实体移动引发：需要重新解析所在归属地）
 ---@param count_entity meta
 function M.dirty_count_entitiy_region(count_entity)
-    current_changes.dirty_count_entities_output[count_entity] = true
+    current_changes.dirty_count_entities_region[count_entity] = true
 end
 
 ---标记归属地计数脏
