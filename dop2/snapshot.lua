@@ -19,15 +19,14 @@ local changes = require("__ghost-reader__/dop2/changes")
 local item = require("__ghost-reader__/dop2/item")
 local meta = require("__ghost-reader__/dop2/meta")
 
-local active_unchecked = {}
-local active_checked = {}
-local inactive_unchecked = {}
-local inactive_checked = {}
-
----每 tick 最多检查的快照数
+---每 tick 最多检查的快照数（两个世代共用这一份预算）
 local max_check = 8
----连续多少次无变化后转入不活跃组（查得更稀）
+---连续多少次无变化后转入不活跃世代（查得更稀）
 local inactive_times = 30
+
+---世代索引：活跃世代优先用预算，不活跃世代只在预算有剩时才轮到
+local ACTIVE = 1
+local INACTIVE = 2
 
 ---@class snapshot
 ---@field entity LuaEntity
@@ -35,6 +34,21 @@ local inactive_times = 30
 ---@field snaps string 上一次的指纹
 ---@field checks int 连续无变化的次数
 local snapshot = {}
+
+---@class snapshot_queue 一个世代的三表轮转队列
+---@field todo table<snapshot> 本轮未查（待查队列）
+---@field curr table<snapshot> 本轮已查
+---@field prev table<snapshot> 上轮已查（本轮未查清空后由它接上）
+---@type snapshot_queue[]
+local queues = {
+    --ACTIVE：查得密
+    { todo = {}, curr = {}, prev = {} },
+    --INACTIVE：查得稀
+    { todo = {}, curr = {}, prev = {} },
+}
+
+---队列里的三张分组表名，供遍历用（要改轮转结构只需改这里）
+local QUEUE_LISTS = { "todo", "curr", "prev" }
 
 --================================================================================================
 -- 指纹
@@ -128,65 +142,71 @@ local function update_irp(irp, previous)
     return fingerprint
 end
 
---================================================================================================
--- 轮询
---================================================================================================
-
----comment
+---检查一个快照并更新指纹
 ---@param ss snapshot
 local function check(ss)
-    if ss.entity and ss.entity.valid then
-        local new = ss.update_mod(ss.entity, ss.snaps)
-        if ss.snaps ~= new then
-            ss.snaps = new
-            --内容变了：回到活跃组，接下来查得更密
-            ss.checks = 0
-        else
-            ss.checks = ss.checks + 1
-        end
+    if not (ss.entity and ss.entity.valid) then return end
+    local new = ss.update_mod(ss.entity, ss.snaps)
+    if ss.snaps ~= new then
+        ss.snaps = new
+        --有变化：checks 归零，随后会被放回活跃世代
+        ss.checks = 0
+    else
+        ss.checks = ss.checks + 1
     end
 end
 
----运行一轮检查（每 tick 最多 max_check 个，先活跃组后不活跃组）
-local function on_tick()
-    local i = 0
-    local swap = false
-    while i < max_check do
-        if #active_unchecked == 0 then
-            if #active_checked == 0 or swap then
-                break
-            elseif not swap then
-                active_checked, active_unchecked = active_unchecked, active_checked
-                swap = true
-            end
-        end
-        local ss = table.remove(active_unchecked, 1)
-        check(ss)
-        if ss.checks >= inactive_times then
-            table.insert(inactive_checked, ss)
-        else
-            table.insert(active_checked, ss)
-        end
-        i = i + 1
+---把刚查完的快照放回队列：有变化(checks=0)回活跃世代，久无变化(checks 达标)转不活跃
+---世代，否则留在本世代——世代只决定它被轮到的密度。
+---@param queue snapshot_queue 快照原来所在的队列
+---@param ss snapshot
+local function requeue(queue, ss)
+    if ss.checks == 0 then
+        table.insert(queues[ACTIVE].curr, ss)
+    elseif ss.checks >= inactive_times then
+        table.insert(queues[INACTIVE].curr, ss)
+    else
+        table.insert(queue.curr, ss)
     end
-    swap = false
-    while i < max_check do
-        if #inactive_unchecked == 0 then
-            if #inactive_checked == 0 or swap then
-                break
-            elseif not swap then
-                inactive_checked, inactive_unchecked = inactive_unchecked, inactive_checked
-                swap = true
-            end
+end
+
+---跑一个世代的队列，返回剩余预算。每代内部是「上轮已查 / 本轮已查 / 本轮未查」三组轮转：
+---  1. 从 todo 取一个查完移入 curr；
+---  2. todo 清空 -> 交换 prev 与 todo（此刻 todo 为空，等价于把 prev 提升为本轮待查）；
+---  3. 本帧检查结束 -> 把 curr 单向并入 prev（单向传递），让本轮查过的成为下一轮的"上轮"。
+---之所以能保证「一个快照一帧最多检查一次」：进入 todo 的来源只有 prev，而 prev 只在
+---第 3 步（本世代本帧的检查全部结束之后）才被本轮结果填充；查完的快照只进 curr，本帧
+---不会再回到 todo。因此同一帧里不存在重复检查。
+---@param queue snapshot_queue
+---@param budget int
+---@return int budget 剩余预算
+local function run_queue(queue, budget)
+    while budget > 0 do
+        if #queue.todo == 0 then
+            if #queue.prev == 0 then break end
+            queue.todo, queue.prev = queue.prev, queue.todo
         end
-        local ss = table.remove(inactive_unchecked, 1)
+        local ss = table.remove(queue.todo, 1)
         check(ss)
-        if ss.checks == 0 then
-            table.insert(active_checked, ss)
-        else
-            table.insert(inactive_checked, ss)
-        end
-        i = i + 1
+        requeue(queue, ss)
+        budget = budget - 1
+    end
+    --本帧检查结束：本轮检查的单向并入上一轮检查的（单向传递，不是交换），
+    --本轮顺势清空——同一张表原地复用，不必每帧新建
+    local curr = queue.curr
+    for i = 1, #curr do
+        local ss = curr[i]
+        curr[i] = nil
+        queue.prev[#queue.prev + 1] = ss
+    end
+    return budget
+end
+
+---运行一轮检查：两个世代共用一份预算，活跃世代优先
+local function on_tick()
+    local budget = max_check
+    for _, queue in ipairs(queues) do
+        budget = run_queue(queue, budget)
     end
 end
 
@@ -215,7 +235,7 @@ end
 ---@return snapshot
 function M.add_inventory_snapshot(entity)
     local ss = snapshot:new(entity, update_inventories)
-    table.insert(active_unchecked, ss)
+    table.insert(queues[ACTIVE].todo, ss)
     return ss
 end
 
@@ -224,7 +244,7 @@ end
 ---@return snapshot
 function M.add_tilepos_snapshot(entity)
     local ss = snapshot:new(entity, update_pos)
-    table.insert(active_unchecked, ss)
+    table.insert(queues[ACTIVE].todo, ss)
     return ss
 end
 
@@ -233,35 +253,33 @@ end
 ---@return snapshot
 function M.add_irp_snapshot(irp)
     local ss = snapshot:new(irp, update_irp)
-    table.insert(active_unchecked, ss)
+    table.insert(queues[ACTIVE].todo, ss)
     return ss
 end
 
----comment
----@param list table<snapshot>
----@param entity LuaEntity
-local function remove_snapshot_in_list(list, entity)
-    for i = #list, 1, -1 do
-        if list[i].entity == entity then
-            table.remove(list, i)
+---把满足条件的快照从所有世代队列里摘掉
+---@param match fun(ss: snapshot): boolean
+local function remove_where(match)
+    for _, queue in ipairs(queues) do
+        for _, key in ipairs(QUEUE_LISTS) do
+            local list = queue[key]
+            for i = #list, 1, -1 do
+                if match(list[i]) then
+                    table.remove(list, i)
+                end
+            end
         end
     end
 end
 
 ---@param ss snapshot
 function M.remove_snapshot(ss)
-    remove(active_unchecked, ss)
-    remove(active_checked, ss)
-    remove(inactive_unchecked, ss)
-    remove(inactive_checked, ss)
+    remove_where(function(candidate) return candidate == ss end)
 end
 
 ---@param entity LuaEntity
 function M.remove_snapshots(entity)
-    remove_snapshot_in_list(active_unchecked, entity)
-    remove_snapshot_in_list(active_checked, entity)
-    remove_snapshot_in_list(inactive_unchecked, entity)
-    remove_snapshot_in_list(inactive_checked, entity)
+    remove_where(function(candidate) return candidate.entity == entity end)
 end
 
 M.on_tick = on_tick
