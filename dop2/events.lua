@@ -6,6 +6,7 @@ local changes = require("__ghost-reader__/dop2/changes")
 local snapshot = require("__ghost-reader__/dop2/snapshot")
 local gui = require("__ghost-reader__/dop2/gui")
 local bplib = require("__ghost-reader__/dop2/bplib")
+local paste = require("__ghost-reader__/dop2/paste")
 
 local M = {}
 
@@ -253,6 +254,15 @@ function M.register()
     script.on_event("bplib-overlaps", bplib.on_overlaps)
     if defines.events.on_player_setup_blueprint then
         script.on_event(defines.events.on_player_setup_blueprint, bplib.on_player_setup_blueprint)
+    end
+
+    -- 复制粘贴：隔离读取器与原版恒压器（同为 constant-combinator），
+    -- 并支持读取器之间（含虚影）继承配置
+    if defines.events.on_pre_entity_settings_pasted then
+        script.on_event(defines.events.on_pre_entity_settings_pasted, paste.on_pre_settings_pasted)
+    end
+    if defines.events.on_entity_settings_pasted then
+        script.on_event(defines.events.on_entity_settings_pasted, paste.on_settings_pasted)
     end
 end
 
