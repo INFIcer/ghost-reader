@@ -132,10 +132,12 @@ end
 
 function region:on_destroyed()
     for reader, _ in pairs(self.readers) do
-        reader:reader_set_region(nil)
+        --因为可能出现合并的情况，所以也可能立刻落入新的网络中。使用标脏属地
+        changes.dirty_reader_region(reader)
     end
     for ce, _ in pairs(self.count_entities) do
-        ce:remove_from_region(self)
+        --因为可能出现合并的情况，所以也可能立刻落入新的网络中。使用标脏属地
+        changes.dirty_count_entitiy_region(ce)
     end
 end
 

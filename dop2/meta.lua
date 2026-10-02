@@ -306,7 +306,7 @@ function M.ensure_roboport_meta(port)
         m.roboport_region = r
         local logistic_cell = port.logistic_cell
         local lbox = box(port.position, logistic_cell.logistic_radius)
-        local cbox = box(port.position, logistic_cell.logistic_radius)
+        local cbox = box(port.position, logistic_cell.construction_radius)
         m.cbox = cbox
         m.lbox = lbox
 
