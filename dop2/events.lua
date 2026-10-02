@@ -18,9 +18,6 @@ local function on_tile_ghost_built(e)
     m:set_count_item('ghost', change_type.TILE_SUPPLY, item.item_for_tile(e.ghost_name), e.quality, 1)
 end
 
----@type string
-READER = "ghost-reader"
-
 ---@param event EventData.on_built_entity
 local function on_built_entity(event)
     local e = event.entity
@@ -30,18 +27,8 @@ local function on_built_entity(event)
         on_tile_ghost_built(e)
     elseif e.name == READER then
         meta.ensure_reader_meta(e)
-    elseif e.name == "roboport" then
-        local cr = e.logistic_cell.construction_radius
-        local box = {
-            { e.position.x - cr, e.position.y - cr },
-            { e.position.x + cr, e.position.y + cr }
-        }
-        --新建设区域内的实体，标记归属地脏
-        for i, e in e.surface.find_entities(box) do
-            local m = meta.ensure_entity_meta(e)
-            changes.dirty_count_entitiy_region(m)
-        end
-        region.ensure_region_logistic_network(e.logistic_network)
+    elseif e.name == "robotport" then
+        meta.ensure_robotport_meta(e)
     end
 end
 
@@ -58,14 +45,13 @@ end
 
 ---@param event EventData.on_marked_for_deconstruction
 local function on_deconstruction(event)
-    local m = meta.ensure_entity_meta(event.entity)
-    local recycle = {}
-    item.recycle_entity_contents(m.entity, true, false, recycle)
-    for name, count in pairs(recycle) do
-        m:set_count_item('deconstruction', change_type.ENTITY_RECYCLE, item.item_for_entity(name), count)
-    end
-    recycle = {}
-    item.recycle_entity_contents(m.entity, false, true, recycle)
+    local m = meta.ensure_entity_meta(event.entity) 
+    m:set_count_item('deconstruction',
+        change_type.ENTITY_RECYCLE,
+        item.item_for_entity(m.entity.name),
+        m.entity.quality,
+        1) 
+    item.recycle_entity_contents(m.entity)
     for name, count in pairs(recycle) do
         m:set_count_item('deconstruction', change_type.ITEM_RECYCLE, prototypes.item[name], count)
     end
@@ -253,7 +239,7 @@ end
 ---@param event EventData.on_object_destroyed
 local function on_destroyed(event)
     ---需要处理
-    local m = meta.get_meta(event.registration_number)
+    -- local m = meta.get_meta(event.registration_number)
     meta.remove_meta(event.registration_number)
 end
 function M.register()

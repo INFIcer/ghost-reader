@@ -119,7 +119,7 @@ end
 
 function region:on_destroyed()
     for reader, _ in pairs(self.readers) do
-        changes.dirty_reader_region(reader)
+        reader:reader_set_region(nil)
     end
     for ce, _ in pairs(self.count_entities) do
         ce:remove_from_region(self)

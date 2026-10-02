@@ -1,7 +1,12 @@
 local changes = require("__ghost-reader__/dop2/changes")
 local config = require('__ghost-reader__/dop2/config')
 local snapshot = require("__ghost-reader__/dop2/snapshot")
+local region = require("__ghost-reader__/dop2/region")
+local counter = require("__ghost-reader__/dop2/counter")
 
+
+---模块对外暴露部分
+local M = {}
 --================================================================================================
 
 ---@type table<uint64,meta>
@@ -47,11 +52,15 @@ end
 ---@field count_items table<string,count_item> 计数项，仅在计数实体上可访问
 ---@field proxy_target meta 请求容器实体的元数据，仅在IRP上可访问
 ---@field reader_region region 读取器所在归属地，仅在读取器上可访问
----@field count_entity_regions table<region> 计数实体所在归属地，仅在计数实体上可访问
+---@field robotport_region region 平台所在归属地，用于在平台被删除时更新归属地。仅在无人机平台上可访问
+---@field cbox BoundingBox 平台的建设范围，仅在无人机平台上可访问
+---@field lbox BoundingBox 平台的物流范围，仅在无人机平台上可访问
+---@field count_entity_regions table<region,any> 计数实体所在归属地，仅在计数实体上可访问
 local meta = {}
 
 ---@param reg_num uint64 注册号
 ---@param entity LuaEntity 注册实体
+---@return meta
 function meta:new(reg_num, entity)
     local obj = {
         reg_num = reg_num,
@@ -206,14 +215,14 @@ end
 ---@param region region
 function meta:add_to_region(region)
     if not self.count_entity_regions then self.count_entity_regions = {} end
-    table.insert(self.count_entity_regions, region)
+    self.count_entity_regions[region] = true
     region:add_count_entity(self)
 end
 
 ---为计数实体移除归属地
 ---@param region region
 function meta:remove_from_region(region)
-    remove(self.count_entity_regions, region)
+    self.count_entity_regions[region] = nil
     region:remove_count_entity(self)
 end
 
@@ -247,13 +256,20 @@ function meta:on_destroyed()
 
     --读取器清理
     self:reader_set_region(nil)
+    --无人机平台清理(由于无人机平台删除导致归属地尺寸收缩)
+    if self.robotport_region then
+        for i, e in self.entity.surface.find_entities_filtered({ area = self.lbox, name = READER }) do
+            local m = M.ensure_reader_meta(e)
+            changes.dirty_reader_region(m)
+        end
+        for i, e in self.entity.surface.find_entities(self.cbox) do
+            local m = M.ensure_entity_meta(e)
+            changes.dirty_count_entitiy_region(m)
+        end
+    end
 end
 
 --================================================================================================
-
----模块对外暴露部分
-local M = {}
-
 
 ---注册对象的元信息，元数据中保留了实体摧毁后要访问的数据。
 ---因为on_object_destroyed响应时不带实体数据（已完成销毁），所以才不得不这样实现。
@@ -277,6 +293,33 @@ function M.ensure_reader_meta(entity)
     if m == nil then
         m = meta:new(reg_num, entity)
         changes.dirty_reader_region(m)
+    end
+    return m
+end
+
+---@return meta register_meta 注册的元信息
+---@param port LuaEntity 要进行注册的机器人平台
+function M.ensure_robotport_meta(port)
+    local reg_num = script.register_on_object_destroyed(port)
+    local m = objects_meta[reg_num]
+    if m == nil then
+        m = meta:new(reg_num, port)
+        local r = region.ensure_region_logistic_network(port.logistic_network)
+        m.robotport_region = r
+        local logistic_cell = port.logistic_cell
+        local lbox = box(port.position, logistic_cell.logistic_radius)
+        local cbox = box(port.position, logistic_cell.logistic_radius)
+        m.cbox = cbox
+        m.lbox = lbox
+
+        for i, e in port.surface.find_entities_filtered({ area = lbox, name = READER }) do
+            local m = M.ensure_reader_meta(e)
+            m:reader_set_region(r)
+        end
+        for i, e in port.surface.find_entities(cbox) do
+            local m = M.ensure_entity_meta(e)
+            m:add_to_region(r)
+        end
     end
     return m
 end

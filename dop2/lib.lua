@@ -1,3 +1,6 @@
+---@type string
+READER = "ghost-reader"
+
 --- 比较两个数组，返回双方独有的元素
 -- @param arr1 数组1
 -- @param arr2 数组2
@@ -127,4 +130,14 @@ end
 ---@param count count_mode
 function match(kind, filter, count)
     return match_filter(kind, filter) and match_count(kind, count)
+end
+
+---comment
+---@param center MapPosition
+---@param radius number
+function box(center,radius)
+    return {
+        { center.x - radius, center.y - radius },
+        { center.x + radius, center.y + radius }
+    }
 end

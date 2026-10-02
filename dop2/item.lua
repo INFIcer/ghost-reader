@@ -1,3 +1,6 @@
+local counter = require("__ghost-reader__/dop2/counter")
+
+
 -- dop/items.lua
 --
 -- 虚影读取器（Ghost Reader）DOP 重构 —— 物品名解析与回收内容。
@@ -34,35 +37,41 @@ end
 -- 没有 items_to_place_this，改从 mineable_properties.products 取，
 -- 数量 = amount × probability，四舍五入取整（至少 1）。
 ---@param prototype LuaEntityPrototype
----@return nil
-local function mineable_products(prototype)
-  if not prototype then return nil end
-  local ok, mp = pcall(function() return prototype.mineable_properties end)
-  if not (ok and mp and mp.products) then return nil end
-  local out = {}
-  for _, pr in ipairs(mp.products) do
-    if pr and pr.name then
-      local prob = pr.probability
-      if prob == nil then prob = 1 end -- nil 表示必掉（100%）
-      if prob ~= 0 then
-        local amount = pr.amount
-        if not amount and pr.amount_min and pr.amount_max then
-          amount = (pr.amount_min + pr.amount_max) / 2
+---@param recycle counter
+local function mineable_products(prototype, recycle)
+  local mp = prototype.mineable_properties
+  if mp.minable and mp.products then
+    for _, pr in ipairs(mp.products) do
+      if pr and pr.name then
+        local prob = pr.independent_probability
+        if prob == nil then prob = 1 end -- nil 表示必掉（100%）
+        if prob ~= 0 then
+          local amount = pr.amount
+          if not amount and pr.amount_min and pr.amount_max then
+            amount = (pr.amount_min + pr.amount_max) / 2
+          end
+          amount = amount or 1
+          local quality = pr.quality_min
+          if type(quality) == "string" then
+            quality = prototypes.quality[quality]
+          end
+          local expected = amount * prob
+          local qty = math.floor(expected + 0.5)
+          if qty < 1 then qty = 1 end
+          recycle:add(prototypes.item[pr.name], quality, qty)
         end
-        amount = amount or 1
-        local expected = amount * prob
-        local qty = math.floor(expected + 0.5)
-        if qty < 1 then qty = 1 end
-        out[pr.name] = (out[pr.name] or 0) + qty
       end
     end
   end
-  return out
 end
 
 -- 读取实体"非库存槽"携带的物品：传送带运输线上的物品、机械臂手持物品。
 -- 返回 { [item] = count }。
-local function extra_carry_items(en)
+---comment
+---@param en LuaEntity
+---@param recycle counter
+---@return table
+local function extra_carry_items(en, recycle)
   local et = en.type
   local out = {}
   -- 传送带/地下传送带/分流器把货物存在运输线而非库存里。运输线数量随类型不同：
@@ -154,52 +163,37 @@ end
 -- 把一个被标记拆除的实体，按类别累加进 recycle 表。
 -- include_entities / include_items 控制是否计入实体本身 / 物品。
 ---@param en LuaEntity
----@param include_entities boolean
----@param include_items boolean
----@param recycle table<LuaItem>
-local function recycle_entity_contents(en, include_entities, include_items, recycle)
+---@return table<LuaItemPrototype,table<LuaQualityPrototype ,int>>
+local function recycle_entity_contents(en)
   local et = en.type
+  local recycle = counter.create()
   -- 落地物品：按 stack 物品名 × 数量计为【物品】。
   if et == "item-entity" then
-    if include_items and en.stack then
+    if en.stack then
       local n = en.stack.name
+      local q = en.stack.quality
       local c = en.stack.count or 1
-      if n then recycle[n] = (recycle[n] or 0) + c end
+      if n then recycle:add(prototypes.item[n], q, c) end
     end
-    return
+    return recycle
   end
   -- 环境实体（无 items_to_place_this）：其挖掘产物归类为【物品】。
-  if include_items and not item_for_entity(en.name) then
-    local prods = mineable_products(en.prototype)
-    if prods then
-      for prod, n in pairs(prods) do
-        recycle[prod] = (recycle[prod] or 0) + n
-      end
-      return
-    end
-  end
-  -- 普通建筑：本身作为【实体】。
-  if include_entities then
-    local item = item_for_entity(en.name)
-    if item then recycle[item] = (recycle[item] or 0) + 1 end
+  if not item_for_entity(en.name) then
+    mineable_products(en.prototype, recycle)
+    return recycle
   end
   -- 内部物品/模块作为【物品】（跳过模块库存重复）。
-  if include_items then
-    for inv_index = 1, en.get_max_inventory_index() do
-      local tinv = en.get_inventory(inv_index)
-      if not tinv then goto skip_recycle_inv end
-      for _, st in pairs(tinv.get_contents()) do
-        if st and st.name then
-          recycle[st.name] = (recycle[st.name] or 0) + (st.count or 1)
-        end
-      end
-      ::skip_recycle_inv::
+  for inv_index = 1, en.get_max_inventory_index() do
+    local tinv = en.get_inventory(inv_index)
+    if not tinv then goto skip_recycle_inv end
+    for _, st in pairs(tinv.get_contents()) do
+      recycle:add(prototypes.item[st.name], prototypes.quality[st.quality], st.count)
     end
-    -- 传送带运输线物品 + 机械臂手持物品。
-    for name, n in pairs(extra_carry_items(en)) do
-      recycle[name] = (recycle[name] or 0) + n
-    end
+    ::skip_recycle_inv::
   end
+  -- 传送带运输线物品 + 机械臂手持物品。
+  extra_carry_items(en, recycle)
+  return recycle
 end
 
 M.item_for_entity = item_for_entity
