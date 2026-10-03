@@ -160,6 +160,24 @@ local function on_upgrade(event)
     apply_upgrade(event.entity)
 end
 
+---虚影被升级/降级：把实体类别的计数换成升/降级后的实体。
+---引擎对虚影的升级是"原地"改 ghost_name（既不销毁也不重建、也不走 on_marked_for_upgrade），
+---所以 'ghost' 这个计数项会一直停在旧实体上，必须在这里自己改。
+---事件字段：ghost（升级前的虚影）、target（升级后的原型）、quality（升级后的品质）。
+---事件在升级之前触发，故不能读 ghost.ghost_name（那还是旧的）。
+---@param event EventData.on_pre_ghost_upgraded
+local function on_ghost_upgraded(event)
+    local ghost = event.ghost
+    if not (ghost and ghost.valid) then return end
+    local m = meta.ensure_entity_meta(ghost)
+    --先撤掉旧实体的计数：升/降级后目标原型可能没有对应物品（取不到物品名），
+    --这时就该干干净净地没有计数，而不是留着旧实体的
+    m:remove_count_item('ghost')
+    m:set_count_item('ghost', change_type.ENTITY_SUPPLY,
+        item.item_for_entity(event.target and event.target.name),
+        event.quality and event.quality.name, 1)
+end
+
 ---@param event EventData.on_cancelled_upgrade
 local function on_cancel_upgrade(event)
     local m = meta.ensure_entity_meta(event.entity)
@@ -406,8 +424,15 @@ local function on_tick()
     for region, _ in pairs(changes.current.dirty_regions_output) do
         if region:vaild() then
             region:update_count()
+            --读取器可能已经失效（标脏与处理之间被拆掉，归属地表里还留着它）：
+            --就地摘掉并丢弃元信息，免得下一帧再去碰失效实体
             for reader, _ in pairs(region.readers) do
-                changes.dirty_reader_output(reader)
+                if reader:vaild() then
+                    changes.dirty_reader_output(reader)
+                else
+                    region:remove_reader(reader)
+                    meta.remove_meta(reader.reg_num)
+                end
             end
         end
     end
@@ -419,6 +444,8 @@ local function on_tick()
         if r:vaild() then
             r:reader_set_region(reader_region_of(r.entity))
             changes.dirty_reader_output(r)
+        else
+            meta.remove_meta(r.reg_num)
         end
     end
 
@@ -427,8 +454,14 @@ local function on_tick()
     for reader, _ in pairs(changes.current.dirty_readers_output) do
         ---@type meta
         local r = reader
-        r:write_outputs()
-        gui.update_tooltip(r.entity)
+        --读取器可能已经失效：标脏之后、处理之前被拆掉（平台与读取器同一帧被拆、
+        --或者上一帧中途出错把脏标记留到了本帧）。失效就跳过——它已经没有输出了。
+        if r:vaild() then
+            r:write_outputs()
+            gui.update_tooltip(r.entity)
+        else
+            meta.remove_meta(r.reg_num)
+        end
     end
 
     --刷新已打开的面板（状态行与信号表随配置/归属地变化）
@@ -459,6 +492,8 @@ function M.register()
     script.on_event(defines.events.on_marked_for_upgrade, on_upgrade)
     script.on_event(defines.events.on_cancelled_upgrade, on_cancel_upgrade)
     -- script.on_event(defines.events.on_pre_ghost_upgraded, on_upgrade)
+    --虚影升级/降级：引擎原地改 ghost_name，要靠这个事件把实体计数换成新实体
+    script.on_event(defines.events.on_pre_ghost_upgraded, on_ghost_upgraded)
     script.on_event(defines.events.on_script_trigger_effect, on_irp_created)
     script.on_event(defines.events.on_tick, on_tick)
 

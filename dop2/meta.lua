@@ -161,26 +161,27 @@ function meta:mark_dirty()
     changes.dirty_count_entitiy_output(self)
 end
 
----读取器当前输出信号
+---把某个归属地的计数按配置过滤合并成输出计数表
 ---按配置的筛选模式/数量模式过滤合并归属地计数，NET 模式下回收计为负数。
 ---GUI 信号表与电路输出共用本函数，避免两处各写一遍合并逻辑。
----@return counter 合并结果：item -> quality -> count
-function meta:read_output()
+---@param reader_region region|nil
+---@param unit uint64 读取器单位号（配置按单位号存放）
+---@return counter 合并结果：item名 -> quality名 -> count
+function M.read_region_output(reader_region, unit)
     local out = counter.create()
-    local reader_region = self.reader_region
     --读取器不在任何归属地内（如未接入物流网络）时没有可读的计数
     if not (reader_region and reader_region.count) then return out end
 
-    local uint = self.entity.unit_number
-    local filter = config.get_filter(uint)
-    local mode = config.get_count(uint)
-    local quality_filter = config.get_quality(uint)
+    local filter = config.get_filter(unit)
+    local mode = config.get_count(unit)
+    local quality_filter = config.get_quality(unit)
     for kind, item_counts in pairs(reader_region.count) do
         if match(kind, filter, mode) then
             local negtive = mode == count_mode.NET and match_count(kind, count_mode.RECYCLE)
             for item, quality_counts in pairs(item_counts) do
                 for quality, count in pairs(quality_counts) do
-                    if match_quality(quality.name, quality_filter) then
+                    --键已经是名字（字符串），与配置里的品质名同一形态，直接比
+                    if match_quality(quality, quality_filter) then
                         if negtive then
                             counter.add(out, item, quality, -count)
                         else
@@ -194,6 +195,41 @@ function meta:read_output()
     return out
 end
 
+---读取器当前的归属地。
+---真实读取器用元信息里已解析好的归属地；虚影没有归属地缓存，按配置与位置现算
+---（面板要能预览虚影建成后会读到什么，这也是 dop1 的行为）。
+---@param entity LuaEntity 读取器（真实实体或其虚影）
+---@return region|nil
+function M.region_of(entity)
+    local m = M.get_meta_of(entity)
+    if m and m.reader_region then return m.reader_region end
+
+    local unit = entity.unit_number
+    if type(unit) ~= "number" then return nil end
+    if config.get_mode(unit) == range_mode.SURFACE then
+        return region.ensure_region_surface(entity.surface)
+    end
+    local logistic_network = entity.surface.find_logistic_network_by_position(entity.position, entity.force)
+    if not logistic_network then return nil end
+    return region.ensure_region_logistic_network(logistic_network)
+end
+
+---读取器当前应显示/输出的信号（真实实体与虚影通用）
+---@param entity LuaEntity 读取器（真实实体或其虚影）
+---@return counter
+function M.output_of(entity)
+    local unit = entity.unit_number
+    if type(unit) ~= "number" then return counter.create() end
+    return M.read_region_output(M.region_of(entity), unit)
+end
+
+---读取器当前输出信号
+---@return counter 合并结果：item名 -> quality名 -> count
+function meta:read_output()
+    --用建元信息时记下的单位号取配置：实体可能已经失效，不去碰它
+    return M.read_region_output(self.reader_region, self.unit)
+end
+
 ---常量箱 section 的插槽上限（引擎硬上限：slot 索引超出会直接报错，不是静默失败）
 ---注意 LuaLogisticSection::filters_count 是"当前已有多少个过滤器"，不是插槽容量，
 ---不能用它判断是否写满（清空后它恒为 0）。
@@ -203,6 +239,8 @@ local SLOTS_PER_SECTION = 1000
 ---一个 section 的插槽填满（1000 个）时新建 section 继续填充；
 ---本次用不到的旧 section 会被清空，避免残留上一次的信号。
 function meta:write_outputs()
+    --实体已销毁时不能再碰它（例如读取器与平台在同一帧被拆：标脏发生在销毁之前）
+    if not self:vaild() then return end
     ---@type LuaConstantCombinatorControlBehavior
     local cb = self.entity.get_or_create_control_behavior()
     --不支持控制行为的实体（如读取器虚影）没有信号输出

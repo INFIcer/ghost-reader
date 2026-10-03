@@ -3,7 +3,7 @@
 -- 虚影读取器（Ghost Reader）DOP 重构 —— GUI（构建/刷新/事件）。
 --
 -- 面板只做展示与配置写入，不参与计数管线：计数由归属地（region）维护，
--- 面板仅把 meta:read_output() 的结果画出来；配置改动照常只置脏标记，
+-- 面板仅把 meta.output_of(读取器) 的结果画出来；配置改动照常只置脏标记，
 -- 由 on_tick 统一重算，故 GUI 与性能无关。
 --
 -- 面板对应的读取器以「表面号 + 位置」记在 frame.tags 上（tags 只支持基本类型，
@@ -26,6 +26,7 @@ local GR_GUI_FRAME = "gr_gui_frame"
 local GR_GUI_CONTENT = "gr_gui_content"
 local GR_GUI_TABLE = "gr_gui_table"
 local GR_GUI_STATUS = "gr_gui_status"
+local GR_GUI_STATUS_ROW = "gr_gui_status_row"
 local GR_GUI_MODE = "gr_gui_mode"
 local GR_GUI_FILTER = "gr_gui_filter"
 local GR_GUI_COUNT = "gr_gui_count"
@@ -156,8 +157,8 @@ end
 ---@param m meta|nil 读取器元信息（虚影没有）
 ---@return LocalisedString
 local function status_text(entity, m)
-    local reader_region = m and m.reader_region
     --归属地可能已失效（如物流网络被合并/拆除而归属地尚未重新解析），此时不能读它的名字
+    local reader_region = meta.region_of(entity)
     if reader_region and reader_region:vaild() then return reader_region:name() end
     if config.get_mode(entity.unit_number) == range_mode.NETWORK then
         return { "gr-gui.status-no-network" }
@@ -167,14 +168,17 @@ local function status_text(entity, m)
 end
 
 ---信号图标的悬浮提示：物品名（品质）× 数量
----@param item LuaItemPrototype
----@param quality LuaQualityPrototype
+---计数表的键是物品名/品质名（字符串），显示用的本地化名要回原型里取。
+---@param item_name string
+---@param quality_name string
 ---@param count int
 ---@return LocalisedString
-local function signal_tooltip(item, quality, count)
-    local text = { "", item.localised_name or { "", item.name } }
-    if quality.name ~= "normal" then
-        text[#text + 1] = { "", " (", quality.localised_name or { "", quality.name }, ")" }
+local function signal_tooltip(item_name, quality_name, count)
+    local item = prototypes.item[item_name]
+    local text = { "", (item and item.localised_name) or { "", item_name } }
+    if quality_name ~= "normal" then
+        local quality = prototypes.quality[quality_name]
+        text[#text + 1] = { "", " (", (quality and quality.localised_name) or { "", quality_name }, ")" }
     end
     text[#text + 1] = " ×"
     text[#text + 1] = tostring(count)
@@ -183,18 +187,20 @@ end
 
 ---用读取器的输出信号重建信号表
 ---@param table_element LuaGuiElement|nil 信号表
----@param m meta|nil 读取器元信息（虚影没有）
-local function rebuild_table(table_element, m)
+---@param counts counter 信号计数表（item名 -> quality名 -> count）
+local function rebuild_table(table_element, counts)
     if not (table_element and table_element.valid) then return end
     table_element.clear()
-    if not m then return end
-    for item, qualities in pairs(m:read_output()) do
+    for item, qualities in pairs(counts or {}) do
         for quality, count in pairs(qualities) do
+            --注意：2.x 里从对象上取出的方法已经是绑定到该对象的闭包（所以全项目都写
+            --`parent.add{...}` 而不是 `parent:add{...}`），pcall 时只能再传元素参数表，
+            --多传一个 self 会报 "Expected 1 argument but 2 were given"。
             --物品原型未必有 "item/<名字>" 贴图，缺图时跳过这一个信号，不让整个面板刷新失败
-            local ok, icon = pcall(table_element.add, table_element, {
+            local ok, icon = pcall(table_element.add, {
                 type = "sprite-button",
                 style = "transparent_slot",
-                sprite = "item/" .. item.name,
+                sprite = "item/" .. item,
                 tooltip = signal_tooltip(item, quality, count),
             })
             if ok and icon then
@@ -202,6 +208,12 @@ local function rebuild_table(table_element, m)
                 icon.style.width = 40
                 icon.style.height = 40
                 icon.style.padding = 4
+            else
+                --贴图/样式不可用时退化成文本，保证信号内容始终看得见（否则整栏空白且无从判断）
+                pcall(table_element.add, {
+                    type = "label",
+                    caption = signal_tooltip(item, quality, count),
+                })
             end
         end
     end
@@ -245,7 +257,38 @@ end
 ---@param caption_value LocalisedString
 local function add_status_row(parent, caption, caption_value)
     local flow = add_row(parent, caption)
+    --行 flow 也命名：状态标签在 flow 里面，刷新时要两层索引才取得到
+    flow.name = GR_GUI_STATUS_ROW
     flow.add { type = "label", name = GR_GUI_STATUS, caption = caption_value }
+end
+
+---取状态标签（它在状态行的 flow 里，不是内容区的直接子元素）
+---@param content LuaGuiElement
+---@return LuaGuiElement|nil
+local function status_label(content)
+    local row = content[GR_GUI_STATUS_ROW]
+    if not (row and row.valid) then return nil end
+    local label = row[GR_GUI_STATUS]
+    if label and label.valid then return label end
+end
+
+---面板信号表指纹：内容没变就不重建。
+---重建要先把表清空再逐个新建按钮，是面板刷新的主要开销；信号没变时每帧重建纯属浪费。
+---@type table<uint64,string>
+local table_fingerprints = {}
+
+---把信号计数表压成指纹（物品名:品质=数量，排序后拼接）
+---@param counts counter
+---@return string
+local function counts_fingerprint(counts)
+    local parts = {}
+    for item, qualities in pairs(counts) do
+        for quality, count in pairs(qualities) do
+            parts[#parts + 1] = item .. ":" .. quality .. "=" .. tostring(count)
+        end
+    end
+    table.sort(parts)
+    return table.concat(parts, ";")
 end
 
 ---刷新一个玩家的面板（状态行 + 信号表）
@@ -258,10 +301,16 @@ local function refresh_player(player)
     --读取器已不存在（虚影已建成真实读取器/已被挖掉）：面板留着但不再刷新
     local entity = frame_reader(frame)
     if not entity then return end
-    local m = meta.get_meta_of(entity)
-    local status = content[GR_GUI_STATUS]
-    if status and status.valid then status.caption = status_text(entity, m) end
-    rebuild_table(content[GR_GUI_TABLE], m)
+    local status = status_label(content)
+    if status then status.caption = status_text(entity) end
+    --虚影没有归属地与电路输出，但面板同样显示按位置预览的信号（与 dop1 一致）
+    local counts = meta.output_of(entity)
+    local unit = entity.unit_number
+    local fingerprint = counts_fingerprint(counts)
+    if table_fingerprints[unit] ~= fingerprint then
+        table_fingerprints[unit] = fingerprint
+        rebuild_table(content[GR_GUI_TABLE], counts)
+    end
 end
 
 ---构建读取器面板
@@ -296,15 +345,16 @@ local function build(player, entity)
         type = "frame", name = GR_GUI_CONTENT,
         style = "inside_shallow_frame_with_padding", direction = "vertical",
     }
-    local m = meta.get_meta_of(entity)
     add_dropdown_row(content, { "gr-gui.range-mode" }, GR_GUI_MODE, range_options(), config.get_mode(unit))
-    add_status_row(content, { "gr-gui.current-range" }, status_text(entity, m))
+    add_status_row(content, { "gr-gui.current-range" }, status_text(entity))
     add_dropdown_row(content, { "gr-gui.filter" }, GR_GUI_FILTER, filter_options(), config.get_filter(unit))
     add_dropdown_row(content, { "gr-gui.qty" }, GR_GUI_COUNT, count_options(), config.get_count(unit))
     add_dropdown_row(content, { "gr-gui.quality" }, GR_GUI_QUALITY, quality_options(), config.get_quality(unit))
     content.add { type = "label", caption = { "gr-gui.output" }, style = "frame_subheading_label" }
     content.add { type = "table", name = GR_GUI_TABLE, column_count = 6 }
-    rebuild_table(content[GR_GUI_TABLE], m)
+    local counts = meta.output_of(entity)
+    table_fingerprints[unit] = counts_fingerprint(counts)
+    rebuild_table(content[GR_GUI_TABLE], counts)
 
     player.opened = frame
 end
