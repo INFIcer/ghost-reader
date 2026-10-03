@@ -107,23 +107,61 @@ local function extra_carry_items(en, recycle)
     end
   end
 end
--- 实体是否可能有"可计数的内容物"（决定被标拆除时是否需要建内容物快照）。
--- 与 recycle_entity_contents 的分支一一对应：
---   * 落地物品（item-entity）；
---   * 环境实体（树/岩石/鱼等，无 items_to_place_this，产物来自 mineable_properties）；
---   * 有储物格，或传送带/机械臂这类把货物放在运输线/手持栈上（而非库存里）的实体。
--- 静态建筑（墙/管道/灯等）三种都不满足，内容物恒为空，不必建快照。
--- 地格代理（deconstructible-tile-proxy）单独排除：它只代表"地格被标记拆除"，
--- 自身没有任何内容物，大范围拆地格时给它建快照纯属浪费。
+-- 被标拆除实体的"内容物"分两类，处理方式完全不同，故这里也分成两组函数：
+--
+--   * 立即拆除类（环境实体 / 落地物品）：标记拆除的瞬间就被移除（不需要机器人来搬），
+--     回收物当场就能算准，所以标记时直接计一次即可，不必建内容物快照；
+--   * 有内部存储类（容器 / 机器 / 传送带 / 机械臂 / 载具）：机器人要一件件把东西搬走，
+--     数量会随时间变化，必须用内容物快照轮询跟踪。
+--
+--   判定顺序上两类互斥（落地物品没有内部存储；有内部存储的实体都有可放置物品），
+--   但调用方仍各自判一次、各自处理，万一将来出现两者兼具的实体也不会漏计。
+
+---是否立即拆除类实体（环境实体 / 落地物品）。
+---环境实体（树/岩石/鱼等）没有可放置物品，其回收由挖掘产物代表。
 ---@param en LuaEntity
 ---@return boolean
-local function has_countable_contents(en)
+local function is_instant_recycle(en)
+  if not (en and en.valid) then return false end
+  if en.type == "item-entity" then return true end
+  return item_for_entity(en.name) == nil
+end
+
+---立即拆除类实体的回收物（counter）：落地物品取 stack，环境实体取挖掘产物。
+---@param en LuaEntity
+---@return counter
+local function instant_recycle_items(en)
+  local recycle = counter.create()
+  if not (en and en.valid) then return recycle end
+
+  -- 落地物品：按 stack 物品名 × 数量计为【物品】
+  if en.type == "item-entity" then
+    if en.stack then
+      local n = en.stack.name
+      --LuaItemStack.quality 是品质原型，计数表要名字
+      local sq = en.stack.quality
+      if n and prototypes.item[n] then
+        recycle:add(n, ensure_quality(sq and sq.name), en.stack.count or 1)
+      end
+    end
+    return recycle
+  end
+
+  -- 环境实体：挖掘产物
+  mineable_products(en.prototype, recycle)
+  return recycle
+end
+
+---实体是否有内部存储（决定是否需要建内容物快照）。
+---有储物格，或传送带/机械臂这类把货物放在运输线/手持栈上（而非库存里）的实体。
+---落地物品与地格代理单独排除：前者没有内部存储（它本身就是一份 stack），
+---后者只代表"地格被标记拆除"，大范围拆地格时给它建快照纯属浪费。
+---@param en LuaEntity
+---@return boolean
+local function has_inventory_contents(en)
   if not (en and en.valid) then return false end
   local et = en.type
-  if et == "deconstructible-tile-proxy" then return false end
-  if et == "item-entity" then return true end
-  --环境实体没有可放置物品，其"内容物"是挖掘产物
-  if not item_for_entity(en.name) then return true end
+  if et == "deconstructible-tile-proxy" or et == "item-entity" then return false end
   --有储物格
   for i = 1, en.get_max_inventory_index() do
     local ok, inv = pcall(function() return en.get_inventory(i) end)
@@ -152,6 +190,8 @@ local MOVABLE_TYPES = {
 }
 
 -- 是否可移动（位置会变，需检测进出建设区域）。不可移动但有内容物的实体只需内容检测。
+-- 落地物品（item-entity）也在其中：它虽然属于"瞬间拆除类"（计数只在标记时算一次），
+-- 但位置随时可能变（被挪动/被机器人搬到别处），必须靠位置快照跟踪归属地。
 ---comment
 ---@param en LuaEntity
 ---@return boolean
@@ -160,30 +200,14 @@ local function is_movable(en)
   return MOVABLE_TYPES[en.type] ~= nil
 end
 
--- 把一个被标记拆除的实体，按类别累加进 recycle 表（counter）。
+-- 统计一个有内部存储的实体当前携带的物品（counter）。
+-- 快照轮询会反复调用它：数量变化时整体替换该实体的 'deconstruction-inventory'。
+-- 模块库存按 get_max_inventory_index 遍历（跳过不存在的编号），
+-- 传送带/机械臂的货物不在库存里，另由 extra_carry_items 取。
 ---@param en LuaEntity
 ---@return counter
-local function recycle_entity_contents(en)
-  local et = en.type
+local function inventory_contents(en)
   local recycle = counter.create()
-  -- 落地物品：按 stack 物品名 × 数量计为【物品】。
-  if et == "item-entity" then
-    if en.stack then
-      local n = en.stack.name
-      --LuaItemStack.quality 是品质原型，计数表要名字
-      local sq = en.stack.quality
-      if n and prototypes.item[n] then
-        recycle:add(n, ensure_quality(sq and sq.name), en.stack.count or 1)
-      end
-    end
-    return recycle
-  end
-  -- 环境实体（无 items_to_place_this）：其挖掘产物归类为【物品】。
-  if not item_for_entity(en.name) then
-    mineable_products(en.prototype, recycle)
-    return recycle
-  end
-  -- 内部物品/模块作为【物品】（跳过模块库存重复）。
   for inv_index = 1, en.get_max_inventory_index() do
     local tinv = en.get_inventory(inv_index)
     if not tinv then goto skip_recycle_inv end
@@ -242,9 +266,11 @@ end
 M.item_for_entity = item_for_entity
 M.item_for_tile = item_for_tile
 M.mineable_products = mineable_products
-M.has_countable_contents = has_countable_contents
+M.is_instant_recycle = is_instant_recycle
+M.instant_recycle_items = instant_recycle_items
+M.has_inventory_contents = has_inventory_contents
+M.inventory_contents = inventory_contents
 M.is_movable = is_movable
-M.recycle_entity_contents = recycle_entity_contents
 M.irp_requests = irp_requests
 M.irp_removals = irp_removals
 

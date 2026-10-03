@@ -65,7 +65,11 @@ end
 ---  * 地格代理（deconstructible-tile-proxy）：它代表"某格地格被标记拆除"，
 ---    只有地格类别的回收（地格 → 可放置该地格的物品），单独一个计数项；
 ---  * 普通实体本身：实体类别回收（这个计数项同时充当"已标记拆除"的判据）；
----  * 实体携带的物品：交给内容物快照（创建即算一次，之后由轮询跟踪变化）。
+---  * 实体携带的物品，又按"是否需要机器人一件件搬"分两类：
+---      - 环境实体/落地物品：标记拆除的瞬间就被移除，回收物当场算准，
+---        直接计一次到 'deconstruction-instant'，不建快照；
+---      - 有内部存储的实体：机器人一件件搬，数量会变，
+---        交给内容物快照写入 'deconstruction-inventory' 并由轮询跟踪。
 ---事件处理与全量重建共用本函数，保证两条路径登记出的状态完全一致。
 ---@param entity LuaEntity
 local function apply_deconstruction(entity)
@@ -90,12 +94,23 @@ local function apply_deconstruction(entity)
         item.item_for_entity(entity.name),
         entity.quality.name,
         1)
+    --可移动实体（含落地物品）另建位置快照：位置会变，而"移动"没有任何事件可听，
+    --只能靠快照按格点比对指纹，发现它进出建设区域后重解析归属地。
+    --注意这与上面"瞬间计一次"是两件事：计数只在标记时定，位置则持续跟踪。
     if item.is_movable(entity) then
         m:register_movable()
     end
-    --实体携带的物品交给内容物快照：快照创建时就会立刻算一次并写入
-    --'deconstruction-inventory'，之后内容变化（机器人搬走）由轮询增量更新
-    if item.has_countable_contents(entity) then
+
+    --环境实体/落地物品：瞬间拆除，回收物现在就定了，计一次即可（空表就没必要占计数项）
+    if item.is_instant_recycle(entity) then
+        local recycled = item.instant_recycle_items(entity)
+        if next(recycled) then
+            m:replace_count_item(COUNT_DECON_INSTANT, change_type.ITEM_RECYCLE, recycled)
+        end
+    end
+    --有内部存储：交给内容物快照（创建时立刻算一次写进 'deconstruction-inventory'，
+    --之后内容变化——机器人搬走——由轮询增量更新）
+    if item.has_inventory_contents(entity) then
         m.inventory_snapshot = snapshot.add_inventory_snapshot(entity)
     end
 end
@@ -110,6 +125,7 @@ local function on_cancel_deconstruction(event)
     local m = meta.ensure_entity_meta(event.entity)
     m:remove_count_item(COUNT_DECON_ENTITY)
     m:remove_count_item(COUNT_DECON_INVENTORY)
+    m:remove_count_item(COUNT_DECON_INSTANT)
     m:remove_count_item(COUNT_DECON_TILE)
     if m.movable > 0 then
         m:unregister_movable()

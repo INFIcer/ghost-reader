@@ -6,7 +6,9 @@ READER = "ghost-reader"
 ---@type string
 COUNT_DECON_ENTITY = "deconstruction-entity"        --被拆实体本身（同时用作"已标记拆除"的判据）
 ---@type string
-COUNT_DECON_INVENTORY = "deconstruction-inventory"  --被拆实体携带的物品
+COUNT_DECON_INVENTORY = "deconstruction-inventory"  --被拆实体内部存储里的物品（机器人一件件搬，需快照轮询）
+---@type string
+COUNT_DECON_INSTANT = "deconstruction-instant"      --瞬间拆除的实体（环境实体/落地物品）的回收物，标记时一次算清
 ---@type string
 COUNT_DECON_TILE = "deconstruction-tile"            --被拆地格（地格类别回收；由 deconstructible-tile-proxy 代表）
 ---@type string

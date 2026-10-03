@@ -82,27 +82,18 @@ end
 -- 快照更新函数
 --================================================================================================
 
----把计数器整体写进某个实体的某个计数项的某个类别（替换而非累加）
----@param entity LuaEntity
----@param name string 计数项名
----@param kind change_type
----@param c counter
-local function replace_count_item(entity, name, kind, c)
-    local m = meta.ensure_entity_meta(entity)
-    m:get_count_item(name):replace(kind, c)
-    changes.dirty_count_entitiy_output(m)
-end
-
----内容物快照：把实体当前携带的物品（库存/传送带货物/机械臂手持物/挖掘产物）
----算成一个 counter，指纹变化时整体替换 'deconstruction-inventory'
+---内容物快照：把实体内部存储里的物品（库存/传送带货物/机械臂手持物）
+---算成一个 counter，指纹变化时整体替换 'deconstruction-inventory'。
+---只跟踪"有内部存储"的实体：环境实体/落地物品是瞬间拆除的，标记时已一次算清，
+---不需要（也不该）建快照。
 ---@param entity LuaEntity
 ---@param previous string|nil
 ---@return string
 local function update_inventories(entity, previous)
-    local contents = item.recycle_entity_contents(entity)
+    local contents = item.inventory_contents(entity)
     local fingerprint = counter_fingerprint(contents)
     if fingerprint ~= previous then
-        replace_count_item(entity, COUNT_DECON_INVENTORY, change_type.ITEM_RECYCLE, contents)
+        meta.ensure_entity_meta(entity):replace_count_item(COUNT_DECON_INVENTORY, change_type.ITEM_RECYCLE, contents)
     end
     return fingerprint
 end

@@ -117,6 +117,16 @@ function meta:set_count_item(name, kind, item, quality, count)
     self:mark_dirty()
 end
 
+---用整张计数器覆盖某个计数项的某个类别（替换而非累加）。
+---用于"一次算清一整份计数"的场景：快照重算内容物、瞬间拆除类的回收物。
+---@param name string 计数项的id
+---@param kind change_type
+---@param c counter
+function meta:replace_count_item(name, kind, c)
+    self:get_count_item(name):replace(kind, c)
+    self:mark_dirty()
+end
+
 ---删除一个计数项
 ---@param name string 计数项的id
 function meta:remove_count_item(name)
