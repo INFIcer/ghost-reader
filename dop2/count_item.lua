@@ -42,31 +42,31 @@ end
 
 ---设置计数（覆盖）
 ---@param kind change_type
----@param item LuaItemPrototype
----@param quality? LuaQualityPrototype
+---@param item string 物品名
+---@param quality? string 品质名（缺省为 normal）
 ---@param count int
 function count_item:set(kind, item, quality, count)
-    counter.set(self:counter_of(kind), item, ensure_quality(quality), count)
+    self:counter_of(kind):set(item, ensure_quality(quality), count)
 end
 
 ---增量修改计数（正负均可）
 ---@param kind change_type
----@param item LuaItemPrototype
----@param quality? LuaQualityPrototype
+---@param item string 物品名
+---@param quality? string 品质名（缺省为 normal）
 ---@param count int
 function count_item:add(kind, item, quality, count)
-    counter.add(self:counter_of(kind), item, ensure_quality(quality), count)
+    self:counter_of(kind):add(item, ensure_quality(quality), count)
 end
 
 ---读取计数
 ---@param kind change_type
----@param item LuaItemPrototype
----@param quality? LuaQualityPrototype
+---@param item string 物品名
+---@param quality? string 品质名（缺省为 normal）
 ---@return int count
 function count_item:read(kind, item, quality)
     local item_counts = self[kind]
     if not item_counts then return 0 end
-    return counter.read(item_counts, item, ensure_quality(quality))
+    return item_counts:read(item, ensure_quality(quality))
 end
 
 ---用给定计数器整体替换某个类别的计数（替换而非累加）。

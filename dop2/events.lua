@@ -26,13 +26,13 @@ end
 ---@param e LuaEntity
 local function on_entity_ghost_built(e)
     local m = meta.ensure_entity_meta(e)
-    m:set_count_item('ghost', change_type.ENTITY_SUPPLY, item.item_for_entity(e.ghost_name), e.quality, 1)
+    m:set_count_item('ghost', change_type.ENTITY_SUPPLY, item.item_for_entity(e.ghost_name), e.quality.name, 1)
 end
 
 ---@param e LuaEntity
 local function on_tile_ghost_built(e)
     local m = meta.ensure_entity_meta(e)
-    m:set_count_item('ghost', change_type.TILE_SUPPLY, item.item_for_tile(e.ghost_name), e.quality, 1)
+    m:set_count_item('ghost', change_type.TILE_SUPPLY, item.item_for_tile(e.ghost_name), e.quality.name, 1)
 end
 
 ---@param event EventData.on_built_entity
@@ -88,7 +88,7 @@ local function apply_deconstruction(entity)
     m:set_count_item(COUNT_DECON_ENTITY,
         change_type.ENTITY_RECYCLE,
         item.item_for_entity(entity.name),
-        entity.quality,
+        entity.quality.name,
         1)
     if item.is_movable(entity) then
         m:register_movable()
@@ -129,13 +129,14 @@ end
 local function apply_upgrade(entity)
     if not (entity and entity.valid) then return end
     local m = meta.ensure_entity_meta(entity)
+    --get_upgrade_target 返回新实体原型 + 新品质（品质是原型，取名字当键）
     local target, target_quality = entity.get_upgrade_target()
     m:set_count_item('upgrade', change_type.UPGRADE_SUPPLY,
         target and item.item_for_entity(target.name),
-        target_quality, 1)
+        target_quality and target_quality.name, 1)
     m:set_count_item('upgrade', change_type.UPGRADE_RECYCLE,
         item.item_for_entity(entity.name),
-        entity.quality, 1)
+        entity.quality.name, 1)
 end
 
 ---@param event EventData.on_marked_for_upgrade
@@ -284,6 +285,53 @@ local function on_load(_)
     needs_rebuild = true
 end
 
+---阵营是不是"有玩家的阵营"。
+---只有有玩家的阵营才会有人架设读取器、才会有该被读取的物流网络；
+---neutral（树/岩石/落地物品）与 enemy（虫巢）没有玩家，它们只需要落到别人的网络里。
+---另外，空载的专用服务器（还没人进来过）里任何阵营都没有玩家，那种情况下
+---退化成"非中立/敌方即视为玩家阵营"，否则归属地解析会在服务器上集体失效。
+---@param force LuaForce
+---@return boolean
+local function is_player_force(force)
+    if #force.players > 0 then return true end
+    if #game.players == 0 then
+        return force ~= game.forces.neutral and force ~= game.forces.enemy
+    end
+    return false
+end
+
+---实体所在位置覆盖它的物流网络。
+---分两种情况：
+---  * 实体属于有玩家的阵营：只可能在自家建设范围里被读取，直接查自己阵营（一次查询）；
+---  * 实体属于没有玩家的阵营（树、岩石、落地物品属 neutral，虫巢属 enemy）：
+---    它们自身阵营根本没有物流网络，只按自身阵营查会一个都取不到，于是网络模式下
+---    永远看不到它们（表面模式按位置归属，不受影响），故改为遍历所有玩家阵营，
+---    按位置找覆盖它们的建设范围。
+---注意 force 参数是单个 ForceID（LuaForce / 阵营序号 / 阵营名），**不是 ForceSet**，
+---传表会直接报 "Invalid ForceID: expected LuaForce, force index or string."，
+---所以"一次查询覆盖所有阵营"做不到，只能按阵营逐个查（次数有界：阵营数）。
+---@param entity LuaEntity
+---@return LuaLogisticNetwork[]
+local function logistic_networks_at(entity)
+    local surface = entity.surface
+    local position = entity.position
+    local force = entity.force
+
+    if is_player_force(force) then
+        return surface.find_logistic_networks_by_construction_area(position, force)
+    end
+
+    local found = {}
+    for _, other in pairs(game.forces) do
+        if is_player_force(other) then
+            for _, logistic_network in ipairs(surface.find_logistic_networks_by_construction_area(position, other)) do
+                found[#found + 1] = logistic_network
+            end
+        end
+    end
+    return found
+end
+
 local function on_tick()
     --0) 读档后的首帧：注册表已随 control.lua 重跑清空，先做一次全量重建
     if needs_rebuild then
@@ -302,9 +350,7 @@ local function on_tick()
             --每个计数实体同时归属所在表面与所在物流网络（读取器按范围模式二选一）。
             --新旧归属地都用集合，比对时只做哈希查表。
             local new_regions = {}
-            local logistic_networks = e.entity.surface.find_logistic_networks_by_construction_area(e.entity.position,
-                e.entity.force)
-            for _, logistic_network in ipairs(logistic_networks) do
+            for _, logistic_network in ipairs(logistic_networks_at(e.entity)) do
                 new_regions[region.ensure_region_logistic_network(logistic_network)] = true
             end
             new_regions[region.ensure_region_surface(e.entity.surface)] = true

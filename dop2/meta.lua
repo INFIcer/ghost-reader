@@ -107,8 +107,8 @@ end
 ---设置一个计数项
 ---@param name string 计数项的id
 ---@param kind change_type
----@param item? LuaItemPrototype
----@param quality? LuaQualityPrototype
+---@param item? string 物品名（计数表的键是名字）
+---@param quality? string 品质名（缺省为 normal）
 ---@param count int
 function meta:set_count_item(name, kind, item, quality, count)
     if not item then return end
@@ -221,7 +221,8 @@ function meta:write_outputs()
                 slot = 0
             end
             slot = slot + 1
-            section.set_slot(slot, { value = { type = 'item', name = item.name, quality = quality.name }, min = count })
+            --计数表的键就是物品名与品质名（字符串），正是 SignalID 需要的形态
+            section.set_slot(slot, { value = { type = 'item', name = item, quality = quality }, min = count })
         end
     end
 end

@@ -62,7 +62,8 @@ local function counter_fingerprint(c)
     local parts = {}
     for item_prototype, quality_counts in pairs(c) do
         for quality, count in pairs(quality_counts) do
-            parts[#parts + 1] = item_prototype.name .. ":" .. quality.name .. "=" .. tostring(count)
+            --键就是物品名与品质名
+            parts[#parts + 1] = item_prototype .. ":" .. quality .. "=" .. tostring(count)
         end
     end
     table.sort(parts)

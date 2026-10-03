@@ -16,24 +16,24 @@ local counter = require("__ghost-reader__/dop2/counter")
 
 local M = {}
 
--- 实体原型 -> 可放置物品名（若无则 nil）
----comment
+-- 实体原型 -> 可放置物品名（若无则 nil）。
+-- 返回名字而非原型：名字是计数表的稳定键，也正好是 SignalID 想要的形式。
 ---@param name string
----@return LuaItemPrototype|nil
+---@return string|nil
 local function item_for_entity(name)
   local p = prototypes.entity[name]
   if p and p.items_to_place_this and #p.items_to_place_this > 0 then
-    return prototypes.item[p.items_to_place_this[1].name]
+    return p.items_to_place_this[1].name
   end
 end
 
 -- 地格原型 -> 可放置物品名（若无则 nil）
 ---@param name string
----@return LuaItemPrototype|nil
+---@return string|nil
 local function item_for_tile(name)
   local p = prototypes.tile[name]
   if p and p.items_to_place_this and #p.items_to_place_this > 0 then
-    return prototypes.item[p.items_to_place_this[1].name]
+    return p.items_to_place_this[1].name
   end
 end
 
@@ -56,17 +56,12 @@ local function mineable_products(prototype, recycle)
             amount = (pr.amount_min + pr.amount_max) / 2
           end
           amount = amount or 1
-          local quality = pr.quality_min
-          if type(quality) == "string" then
-            quality = prototypes.quality[quality]
-          end
           local expected = amount * prob
           local qty = math.floor(expected + 0.5)
           if qty < 1 then qty = 1 end
           --产物可能是流体等非物品，取不到物品原型时跳过（计数表只记物品）
-          local item_prototype = prototypes.item[pr.name]
-          if item_prototype then
-            recycle:add(item_prototype, ensure_quality(quality), qty)
+          if prototypes.item[pr.name] then
+            recycle:add(pr.name, ensure_quality(pr.quality_min), qty)
           end
         end
       end
@@ -91,10 +86,9 @@ local function extra_carry_items(en, recycle)
       local okc, contents = pcall(function() return tl.get_contents() end)
       if okc and contents then
         for _, st in pairs(contents) do
-          --运输线内容物是 ItemStackDefinition，quality 是品质名（需查原型），count 可省略
-          local item_prototype = st and st.name and prototypes.item[st.name] or nil
-          if item_prototype then
-            recycle:add(item_prototype, ensure_quality(prototypes.quality[st.quality]), st.count or 1)
+          --运输线内容物是 ItemStackDefinition，count 可省略；quality 由 ensure_quality 收口
+          if st and st.name and prototypes.item[st.name] then
+            recycle:add(st.name, ensure_quality(st.quality), st.count or 1)
           end
         end
       end
@@ -102,13 +96,13 @@ local function extra_carry_items(en, recycle)
   elseif et == "inserter" then
     local okh, hs = pcall(function() return en.held_stack end)
     if okh and hs then
-      --空手持栈上读 name 会报错，故逐个 pcall 读取；LuaItemStack.quality 已是品质原型
+      --空手持栈上读 name 会报错，故逐个 pcall 读取；
+      --LuaItemStack.quality 是品质原型，计数表要名字，故取 .name
       local okn, name = pcall(function() return hs.name end)
       local okq, quality = pcall(function() return hs.quality end)
-      local item_prototype = (okn and name) and prototypes.item[name] or nil
-      if item_prototype then
+      if (okn and name) and prototypes.item[name] then
         local okc, count = pcall(function() return hs.count end)
-        recycle:add(item_prototype, ensure_quality(okq and quality or nil), (okc and count) or 1)
+        recycle:add(name, ensure_quality(okq and quality and quality.name or nil), (okc and count) or 1)
       end
     end
   end
@@ -176,9 +170,10 @@ local function recycle_entity_contents(en)
   if et == "item-entity" then
     if en.stack then
       local n = en.stack.name
-      local item_prototype = n and prototypes.item[n] or nil
-      if item_prototype then
-        recycle:add(item_prototype, ensure_quality(en.stack.quality), en.stack.count or 1)
+      --LuaItemStack.quality 是品质原型，计数表要名字
+      local sq = en.stack.quality
+      if n and prototypes.item[n] then
+        recycle:add(n, ensure_quality(sq and sq.name), en.stack.count or 1)
       end
     end
     return recycle
@@ -193,10 +188,8 @@ local function recycle_entity_contents(en)
     local tinv = en.get_inventory(inv_index)
     if not tinv then goto skip_recycle_inv end
     for _, st in pairs(tinv.get_contents()) do
-      --LuaInventory.get_contents 返回的 quality 是品质名，需要查原型
-      local item_prototype = st and st.name and prototypes.item[st.name] or nil
-      if item_prototype then
-        recycle:add(item_prototype, ensure_quality(prototypes.quality[st.quality]), st.count or 1)
+      if st and st.name and prototypes.item[st.name] then
+        recycle:add(st.name, ensure_quality(st.quality), st.count or 1)
       end
     end
     ::skip_recycle_inv::
@@ -217,9 +210,8 @@ local function irp_requests(irp)
   local out = counter.create()
   for _, r in pairs(reqs) do
     if r and r.name then
-      local item_prototype = prototypes.item[r.name]
-      if item_prototype then
-        counter.add(out, item_prototype, ensure_quality(prototypes.quality[r.quality]), r.count)
+      if prototypes.item[r.name] then
+        counter.add(out, r.name, ensure_quality(r.quality), r.count)
       end
     end
   end
@@ -237,11 +229,10 @@ local function irp_removals(irp)
   if not removal then error("Can only be used if this is ItemRequestProxy") end
   local out = counter.create()
   for _, r in pairs(removal) do
-    local item_prototype = prototypes.item[r.id.name]
-    if item_prototype then
-      local quality = ensure_quality(prototypes.quality[r.id.quality])
+    if prototypes.item[r.id.name] then
+      local quality = ensure_quality(r.id.quality)
       for _, pos in ipairs(r.items.in_inventory) do
-        counter.add(out, item_prototype, quality, pos.count or 1)
+        counter.add(out, r.id.name, quality, pos.count or 1)
       end
     end
   end

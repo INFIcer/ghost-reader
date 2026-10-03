@@ -83,12 +83,18 @@ function remove(table, e)
     end
 end
 
----确保品质不为空
----@param quality? LuaQualityPrototype
----@return LuaQualityPrototype
+---取品质名（字符串）。
+---计数表/计数项/配置里的品质一律以名字作键：名字是稳定键（原型 userdata 不驻留，
+---两次查表拿到的是不同对象，拿来当表键会让同一品质合不到一起），
+---也正是 SignalID 想要的形式。故这里只接受字符串——
+---引擎给原型的地方（LuaEntity.quality、LuaItemStack.quality）由调用方自己取 .name，
+---传原型会当场报错，避免静默写坏计数。
+---@param quality? string 品质名，缺省为 normal
+---@return string
 function ensure_quality(quality)
-    if not quality then
-        quality = prototypes.quality["normal"]
+    if quality == nil then return "normal" end
+    if type(quality) ~= "string" then
+        error("ensure_quality: 品质要以名字（字符串）传入，原型请先取 .name")
     end
     return quality
 end

@@ -109,11 +109,17 @@ end
 
 ---位置 key：表面号 + 格点坐标。
 ---用格点而非浮点：虚影与建成后的真实读取器位置可能有极小的浮点差异，同格内应视为同一位置。
+---注意 bplib 事件里给的坐标是它内部的数组形式 {x, y}（类型注解写的是 MapPosition，
+---实际来自它自己的 pos_new，取的是 [1]/[2]），所以两种形式都要认——
+---bplib 自己的 pos_get 也是这么处理的。结构不对时返回 nil，由调用方跳过。
 ---@param surface_index int
----@param position MapPosition
----@return string
+---@param position MapPosition|Vector
+---@return string|nil
 local function pos_key(surface_index, position)
-    return surface_index .. ":" .. math.floor(position.x) .. "," .. math.floor(position.y)
+    local x = position and (position.x or position[1])
+    local y = position and (position.y or position[2])
+    if type(x) ~= "number" or type(y) ~= "number" then return nil end
+    return surface_index .. ":" .. math.floor(x) .. "," .. math.floor(y)
 end
 
 ---实体是否是读取器（真实实体或其虚影）
@@ -219,9 +225,10 @@ local function on_positions(event)
     for index, position in pairs(event.positions) do
         if is_reader_blueprint_entity(entities[index]) then
             local cfg = read_tags(blueprint, index)
-            if cfg and position then
+            local key = pos_key(surface_index, position)
+            if cfg and key then
                 storage.pending_tags = storage.pending_tags or {}
-                storage.pending_tags[pos_key(surface_index, position)] = cfg
+                storage.pending_tags[key] = cfg
             end
         end
     end
@@ -293,8 +300,10 @@ end
 ---@param cfg table
 function M.remember_config(entity, cfg)
     if not (entity and entity.valid and entity.surface) then return end
+    local key = pos_key(entity.surface.index, entity.position)
+    if not key then return end
     storage.ghost_cfg = storage.ghost_cfg or {}
-    storage.ghost_cfg[pos_key(entity.surface.index, entity.position)] = cfg
+    storage.ghost_cfg[key] = cfg
 end
 
 M.on_extract = on_extract
