@@ -201,6 +201,8 @@ local function rebuild_table(table_element, counts)
                 type = "sprite-button",
                 style = "transparent_slot",
                 sprite = "item/" .. item,
+                --非普通品质加左下角品质角标（原版风格：normal 不显示角标）
+                quality = quality ~= "normal" and quality or nil,
                 tooltip = signal_tooltip(item, quality, count),
             })
             if ok and icon then

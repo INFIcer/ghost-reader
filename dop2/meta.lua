@@ -399,7 +399,12 @@ function M.ensure_reader_meta(entity)
     if m == nil then
         m = meta:new(reg_num, entity)
         objects_meta[reg_num] = m
+        --读取器既是"读取者"也是"计数实体"：
+        --  * 读取者身份用 reader_region（按范围模式二选一）；
+        --  * 计数实体身份要照常解析归属地，否则它自己身上的计数项
+        --    （被标记拆除时的实体回收、升级等）传播不到任何归属地，读数里看不到。
         changes.dirty_reader_region(m)
+        changes.dirty_count_entitiy_region(m)
     end
     return m
 end
@@ -412,6 +417,10 @@ function M.ensure_roboport_meta(port)
     if m == nil then
         m = meta:new(reg_num, port)
         objects_meta[reg_num] = m
+        --平台自身同样是计数实体：它被标记拆除（以及平台内部存储的物品）要能被读到。
+        --这里不直接 add_to_region：平台所在物流网络当时可能还没解析好，
+        --交给通用的归属地解析（下一帧按位置算出它落在哪些网络/表面）更稳。
+        changes.dirty_count_entitiy_region(m)
         local r = region.ensure_region_logistic_network(port.logistic_network)
         m.roboport_region = r
         local logistic_cell = port.logistic_cell
