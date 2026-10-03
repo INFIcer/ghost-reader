@@ -364,20 +364,30 @@ local function on_tick()
         local e = ce
         if e:vaild() then
             --每个计数实体同时归属所在表面与所在物流网络（读取器按范围模式二选一）。
-            --新旧归属地都用集合，比对时只做哈希查表。
+            --新旧归属地都是集合，逐个查表比对即可，不必再各自攒一张差集表
+            --（原先用 get_unique_elements 会多建两张表，这里直接就地增删）。
+            local old_regions = e.count_entity_regions
             local new_regions = {}
             for _, logistic_network in ipairs(logistic_networks_at(e.entity)) do
                 new_regions[region.ensure_region_logistic_network(logistic_network)] = true
             end
             new_regions[region.ensure_region_surface(e.entity.surface)] = true
 
-            --count_entity_regions 本身就是集合，比对结果也是集合；为 nil 时视为空集合
-            local add, remove = get_unique_elements(new_regions, e.count_entity_regions)
-            for ar in pairs(add) do
-                e:add_to_region(ar)
+            -- 新增：新集合里有、旧集合里没有
+            for r in pairs(new_regions) do
+                if not (old_regions and old_regions[r]) then
+                    e:add_to_region(r)
+                end
             end
-            for rr in pairs(remove) do
-                e:remove_from_region(rr)
+            -- 移除：旧集合里有、新集合里没有。
+            -- remove_from_region 会把键从 count_entity_regions 里删掉（就是 old_regions 本身），
+            -- Lua 允许在遍历中把已有键置 nil，故这里可以直接就地遍历。
+            if old_regions then
+                for r in pairs(old_regions) do
+                    if not new_regions[r] then
+                        e:remove_from_region(r)
+                    end
+                end
             end
         end
     end

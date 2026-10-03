@@ -20,39 +20,6 @@ COUNT_IRP_PREFIX = "irp"                            --IRP 计数项前缀（后�
 ---@type string
 QUALITY_ALL = "all"
 
---- 共享的空集合。比较过程只读传入的集合，故复用安全。
-local EMPTY_SET = {}
-
---- 比较两个集合，返回双方独有的键。
---- 集合是「键 -> 任意值」的表（本项目一律用 true）。这里用集合而不是数组：
---- 增删判断只需哈希查表，调用方（计数实体的归属地增删）本来也用集合保存。
----@param set1 table 集合1，nil 视为空集合
----@param set2 table 集合2，nil 视为空集合
----@return table only_in_set1 仅在 set1 中出现的键集合
----@return table only_in_set2 仅在 set2 中出现的键集合
-function get_unique_elements(set1, set2)
-    set1 = set1 or EMPTY_SET
-    set2 = set2 or EMPTY_SET
-
-    local only_in_set1, only_in_set2 = {}, {}
-
-    -- 找出 set1 中 set2 没有的键
-    for v in pairs(set1) do
-        if not set2[v] then
-            only_in_set1[v] = true
-        end
-    end
-
-    -- 找出 set2 中 set1 没有的键
-    for v in pairs(set2) do
-        if not set1[v] then
-            only_in_set2[v] = true
-        end
-    end
-
-    return only_in_set1, only_in_set2
-end
-
 ---@return boolean
 function contain(table, e)
     for _, value in ipairs(table) do

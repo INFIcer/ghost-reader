@@ -69,44 +69,6 @@ local function mineable_products(prototype, recycle)
   end
 end
 
--- 读取实体"非库存槽"携带的物品：传送带运输线上的物品、机械臂手持物品。
--- 直接累加进 recycle（counter），不再自建 name -> count 表。
----comment
----@param en LuaEntity
----@param recycle counter
-local function extra_carry_items(en, recycle)
-  local et = en.type
-  -- 传送带/地下传送带/分流器把货物存在运输线而非库存里。运输线数量随类型不同：
-  -- 普通传送带 2 条、地下传送带 4 条、分流器 8 条（内部缓存是额外 line 5-8）。
-  -- 遍历到 get_transport_line 返回 nil 为止，带上限保护。
-  if et == "transport-belt" or et == "underground-belt" or et == "splitter" then
-    for line_index = 1, 12 do
-      local ok, tl = pcall(function() return en.get_transport_line(line_index) end)
-      if not (ok and tl) then break end
-      local okc, contents = pcall(function() return tl.get_contents() end)
-      if okc and contents then
-        for _, st in pairs(contents) do
-          --运输线内容物是 ItemStackDefinition，count 可省略；quality 由 ensure_quality 收口
-          if st and st.name and prototypes.item[st.name] then
-            recycle:add(st.name, ensure_quality(st.quality), st.count or 1)
-          end
-        end
-      end
-    end
-  elseif et == "inserter" then
-    local okh, hs = pcall(function() return en.held_stack end)
-    if okh and hs then
-      --空手持栈上读 name 会报错，故逐个 pcall 读取；
-      --LuaItemStack.quality 是品质原型，计数表要名字，故取 .name
-      local okn, name = pcall(function() return hs.name end)
-      local okq, quality = pcall(function() return hs.quality end)
-      if (okn and name) and prototypes.item[name] then
-        local okc, count = pcall(function() return hs.count end)
-        recycle:add(name, ensure_quality(okq and quality and quality.name or nil), (okc and count) or 1)
-      end
-    end
-  end
-end
 -- 被标拆除实体的"内容物"分两类，处理方式完全不同，故这里也分成两组函数：
 --
 --   * 立即拆除类（环境实体 / 落地物品）：标记拆除的瞬间就被移除（不需要机器人来搬），
@@ -202,24 +164,54 @@ end
 
 -- 统计一个有内部存储的实体当前携带的物品（counter）。
 -- 快照轮询会反复调用它：数量变化时整体替换该实体的 'deconstruction-inventory'。
--- 模块库存按 get_max_inventory_index 遍历（跳过不存在的编号），
--- 传送带/机械臂的货物不在库存里，另由 extra_carry_items 取。
+-- 模块库存按 get_max_inventory_index 遍历（跳过不存在的编号）；
+-- 传送带/机械臂的货物不在库存里，在本函数末尾另取。
 ---@param en LuaEntity
 ---@return counter
 local function inventory_contents(en)
   local recycle = counter.create()
-  for inv_index = 1, en.get_max_inventory_index() do
-    local tinv = en.get_inventory(inv_index)
-    if not tinv then goto skip_recycle_inv end
-    for _, st in pairs(tinv.get_contents()) do
-      if st and st.name and prototypes.item[st.name] then
-        recycle:add(st.name, ensure_quality(st.quality), st.count or 1)
+  local et = en.type
+  -- 传送带/地下传送带/分流器把货物存在运输线而非库存里。运输线数量随类型不同：
+  -- 普通传送带 2 条、地下传送带 4 条、分流器 8 条（内部缓存是额外 line 5-8）。
+  -- 遍历到 get_transport_line 返回 nil 为止，带上限保护。
+  if et == "transport-belt" or et == "underground-belt" or et == "splitter" then
+    for line_index = 1, 12 do
+      local ok, tl = pcall(function() return en.get_transport_line(line_index) end)
+      if not (ok and tl) then break end
+      local okc, contents = pcall(function() return tl.get_contents() end)
+      if okc and contents then
+        for _, st in pairs(contents) do
+          --运输线内容物是 ItemStackDefinition，count 可省略；quality 由 ensure_quality 收口
+          if st and st.name and prototypes.item[st.name] then
+            recycle:add(st.name, ensure_quality(st.quality), st.count or 1)
+          end
+        end
       end
     end
-    ::skip_recycle_inv::
+  elseif et == "inserter" then
+    local okh, hs = pcall(function() return en.held_stack end)
+    if okh and hs then
+      --空手持栈上读 name 会报错，故逐个 pcall 读取；
+      --LuaItemStack.quality 是品质原型，计数表要名字，故取 .name
+      local okn, name = pcall(function() return hs.name end)
+      local okq, quality = pcall(function() return hs.quality end)
+      if (okn and name) and prototypes.item[name] then
+        local okc, count = pcall(function() return hs.count end)
+        recycle:add(name, ensure_quality(okq and quality and quality.name or nil), (okc and count) or 1)
+      end
+    end
+  else
+    for inv_index = 1, en.get_max_inventory_index() do
+      local tinv = en.get_inventory(inv_index)
+      if not tinv then goto skip_recycle_inv end
+      for _, st in pairs(tinv.get_contents()) do
+        if st and st.name and prototypes.item[st.name] then
+          recycle:add(st.name, ensure_quality(st.quality), st.count or 1)
+        end
+      end
+      ::skip_recycle_inv::
+    end
   end
-  -- 传送带运输线物品 + 机械臂手持物品。
-  extra_carry_items(en, recycle)
   return recycle
 end
 

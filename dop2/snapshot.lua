@@ -33,22 +33,21 @@ local INACTIVE = 2
 ---@field update_mod fun(entity: LuaEntity, previous: string|nil): string 更新函数：返回指纹，变化时自行更新计数项/标脏
 ---@field snaps string 上一次的指纹
 ---@field checks int 连续无变化的次数
+---@field dead boolean? 已移除（惰性删除：标死后由队列游标跳过，不再检查）
 local snapshot = {}
 
 ---@class snapshot_queue 一个世代的三表轮转队列
 ---@field todo table<snapshot> 本轮未查（待查队列）
 ---@field curr table<snapshot> 本轮已查
 ---@field prev table<snapshot> 上轮已查（本轮未查清空后由它接上）
+---@field head int 待查队列的游标：下一个要查的下标（1 起）
 ---@type snapshot_queue[]
 local queues = {
     --ACTIVE：查得密
-    { todo = {}, curr = {}, prev = {} },
+    { todo = {}, curr = {}, prev = {}, head = 1 },
     --INACTIVE：查得稀
-    { todo = {}, curr = {}, prev = {} },
+    { todo = {}, curr = {}, prev = {}, head = 1 },
 }
-
----队列里的三张分组表名，供遍历用（要改轮转结构只需改这里）
-local QUEUE_LISTS = { "todo", "curr", "prev" }
 
 --================================================================================================
 -- 指纹
@@ -164,32 +163,53 @@ end
 
 ---跑一个世代的队列，返回剩余预算。每代内部是「上轮已查 / 本轮已查 / 本轮未查」三组轮转：
 ---  1. 从 todo 取一个查完移入 curr；
----  2. todo 清空 -> 交换 prev 与 todo（此刻 todo 为空，等价于把 prev 提升为本轮待查）；
+---  2. todo 走完 -> prev 提升为本轮待查（本帧已查完的那张表就此作废，另起一张空的承接本轮结果）；
 ---  3. 本帧检查结束 -> 把 curr 单向并入 prev（单向传递），让本轮查过的成为下一轮的"上轮"。
 ---之所以能保证「一个快照一帧最多检查一次」：进入 todo 的来源只有 prev，而 prev 只在
 ---第 3 步（本世代本帧的检查全部结束之后）才被本轮结果填充；查完的快照只进 curr，本帧
 ---不会再回到 todo。因此同一帧里不存在重复检查。
+---
+---待查队列用游标（queue.head）推进，不用 table.remove(todo, 1)：
+---后者每查一个快照都要把整表后面的元素前移一格，而 todo 长度在轮转中周期性起伏，
+---于是每帧都要做 O(队列长度) 的搬移，且随队列长度变化表现为周期性的卡顿。
+---游标推进后每帧只剩「查几个快照」这点固定开销，与本代快照总数无关（走完一轮才轮转一次，
+---代价是每轮一次空表分配，可以忽略）。
 ---@param queue snapshot_queue
 ---@param budget int
 ---@return int budget 剩余预算
 local function run_queue(queue, budget)
+    local todo = queue.todo
+    local head = queue.head
+    local total = #todo
     while budget > 0 do
-        if #queue.todo == 0 then
+        if head > total then
+            --本轮待查的已走完：prev 提升为待查；本帧已查完的那张表作废，另起空表承接
             if #queue.prev == 0 then break end
-            queue.todo, queue.prev = queue.prev, queue.todo
+            queue.todo = queue.prev
+            queue.prev = {}
+            todo = queue.todo
+            head = 1
+            total = #todo
         end
-        local ss = table.remove(queue.todo, 1)
-        check(ss)
-        requeue(queue, ss)
-        budget = budget - 1
+        local ss = todo[head]
+        head = head + 1
+        --已标记删除的快照直接跳过：不检查、不占预算、也不再入队（槽位随轮转整表丢弃时释放）
+        if not ss.dead then
+            check(ss)
+            requeue(queue, ss)
+            budget = budget - 1
+        end
     end
+    queue.head = head
     --本帧检查结束：本轮检查的单向并入上一轮检查的（单向传递，不是交换），
     --本轮顺势清空——同一张表原地复用，不必每帧新建
     local curr = queue.curr
     for i = 1, #curr do
         local ss = curr[i]
         curr[i] = nil
-        queue.prev[#queue.prev + 1] = ss
+        if not ss.dead then
+            queue.prev[#queue.prev + 1] = ss
+        end
     end
     return budget
 end
@@ -249,29 +269,13 @@ function M.add_irp_snapshot(irp)
     return ss
 end
 
----把满足条件的快照从所有世代队列里摘掉
----@param match fun(ss: snapshot): boolean
-local function remove_where(match)
-    for _, queue in ipairs(queues) do
-        for _, key in ipairs(QUEUE_LISTS) do
-            local list = queue[key]
-            for i = #list, 1, -1 do
-                if match(list[i]) then
-                    table.remove(list, i)
-                end
-            end
-        end
-    end
-end
-
+---标记一个快照为已移除（惰性删除）。
+---销毁/取消拆除常常成批到来（机器人建完或搬完一批实体、整片区域取消拆除），
+---若每次都去队列里全表扫描找对象（还要顺带搬移数组元素），批量时就会周期性卡一下。
+---这里只标死：队列游标扫到就跳过，槽位随轮转整表丢弃时自然释放，删除成本恒为 O(1)。
 ---@param ss snapshot
 function M.remove_snapshot(ss)
-    remove_where(function(candidate) return candidate == ss end)
-end
-
----@param entity LuaEntity
-function M.remove_snapshots(entity)
-    remove_where(function(candidate) return candidate.entity == entity end)
+    ss.dead = true
 end
 
 ---清空所有快照（全量重建时用）。快照依附实体，会随世界状态重新建立。
@@ -280,6 +284,7 @@ function M.reset()
         queue.todo = {}
         queue.curr = {}
         queue.prev = {}
+        queue.head = 1
     end
 end
 
