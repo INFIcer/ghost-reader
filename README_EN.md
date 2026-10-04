@@ -39,8 +39,6 @@ It reads four kinds of requests and tracks them in two directions — **supply**
 
 ## GUI panel
 
-A standard vanilla-styled, draggable window with a close button in the top-right corner.
-
 - **Scan range mode**
   - `Surface`: scan every request on the whole planet surface.
   - `Logistics network`: scan only the requests inside the reader's logistics network (construction area).
@@ -79,7 +77,7 @@ This section is for developers who want to quickly understand the mod's structur
 - **control.lua** — the **entry file**: it requires the modules under `dop2/` in dependency order, injects the cross-module dependency, and finally calls `events.register()`.
 - **dop2/** — all runtime logic, split into 14 modules by responsibility (see "File structure").
 
-> The `dop/` directory holds the pre-refactor implementation (one large control.lua) as a backup; it is not loaded. To go back, copy `control_dop.lua` over `control.lua`.
+> The `dop/` directory holds the pre-refactor implementation as a backup; it is not loaded. To go back, copy `control_dop.lua` over `control.lua`.
 
 ## Modules (dop2/)
 

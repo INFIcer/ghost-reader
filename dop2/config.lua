@@ -50,6 +50,13 @@ local function apply_config(unit, cfg)
     if cfg.quality then s.quality = cfg.quality end
 end
 
+-- 过滤器组合的缓存键：筛选模式 | 数量模式 | 品质筛选。
+-- 三个值都是稳定的字符串（枚举值/品质名），拼起来即可作为归属地输出缓存的键：
+-- 键相同 => 过滤结果必然相同，多个读取器可以直接复用同一份结果。
+local function output_key(unit)
+    return get_filter(unit) .. "|" .. get_count(unit) .. "|" .. get_quality(unit)
+end
+
 M.get_mode = get_mode
 M.get_filter = get_filter
 M.get_count = get_count
@@ -60,5 +67,6 @@ M.set_count = set_count
 M.set_quality = set_quality
 M.reader_config = reader_config
 M.apply_config = apply_config
+M.output_key = output_key
 
 return M

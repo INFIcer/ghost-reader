@@ -11,6 +11,7 @@ local regions = {}
 ---@field readers table<meta,any>
 ---@field count_entities table<meta,any>
 ---@field count count_item 归属地内所有计数实体合并后的计数
+---@field outputs table<string,counter>|nil 按过滤器组合缓存的读取结果（见 meta.read_region_output）
 local region = {}
 
 
@@ -25,6 +26,7 @@ function region:new_surface(reg_num, surface)
         readers = {},
         count_entities = {},
         count = nil,
+        outputs = nil,
     }
     setmetatable(obj, { __index = self })
     return obj
@@ -41,6 +43,7 @@ function region:new_logistic_network(reg_num, logistic_network)
         readers = {},
         count_entities = {},
         count = nil,
+        outputs = nil,
     }
     setmetatable(obj, { __index = self })
     return obj
@@ -92,6 +95,8 @@ function region:update_count()
         end
     end
     self.count = count
+    --计数变了，之前按过滤器组合缓存的读取结果全部作废
+    self.outputs = nil
 end
 
 ---添加读取器元数据

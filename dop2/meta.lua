@@ -164,14 +164,27 @@ end
 ---把某个归属地的计数按配置过滤合并成输出计数表
 ---按配置的筛选模式/数量模式过滤合并归属地计数，NET 模式下回收计为负数。
 ---GUI 信号表与电路输出共用本函数，避免两处各写一遍合并逻辑。
+---
+---结果按「过滤器组合」缓存在归属地上：过滤只取决于（归属地计数, 筛选, 数量, 品质），
+---配置相同的读取器结果必然一样，所以同一归属地下的同配置读取器共用一份结果——
+---大量读取器时这是主要开销（每次计数变化都要为每个读取器重新过滤一遍归属地计数）。
+---归属地计数一变（region:update_count）缓存即作废；读取器改配置只是换了个键。
+---返回的计数表是**共享的只读结果**，调用方不得修改。
 ---@param reader_region region|nil
 ---@param unit uint64 读取器单位号（配置按单位号存放）
 ---@return counter 合并结果：item名 -> quality名 -> count
 function M.read_region_output(reader_region, unit)
-    local out = counter.create()
     --读取器不在任何归属地内（如未接入物流网络）时没有可读的计数
-    if not (reader_region and reader_region.count) then return out end
+    if not (reader_region and reader_region.count) then return counter.create() end
 
+    local key = config.output_key(unit)
+    local outputs = reader_region.outputs
+    if outputs then
+        local cached = outputs[key]
+        if cached then return cached end
+    end
+
+    local out = counter.create()
     local filter = config.get_filter(unit)
     local mode = config.get_count(unit)
     local quality_filter = config.get_quality(unit)
@@ -192,6 +205,12 @@ function M.read_region_output(reader_region, unit)
             end
         end
     end
+
+    if not outputs then
+        outputs = {}
+        reader_region.outputs = outputs
+    end
+    outputs[key] = out
     return out
 end
 
