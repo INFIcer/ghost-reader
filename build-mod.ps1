@@ -115,6 +115,8 @@ foreach ($f in @(Get-ChildItem -LiteralPath $ModRoot -Recurse -File -Force -Erro
 
     if ($skipDirs -contains $segments[0]) { continue }
     if ($skipFiles -contains $f.Name) { continue }
+    # editor / dev leftovers such as .probe.ps1 or .DS_Store
+    if ($segments[0].StartsWith('.')) { continue }
 
     $inSkippedDir = $false
     foreach ($seg in $segments) {
@@ -162,22 +164,51 @@ try {
         Copy-Item -LiteralPath $f.Full -Destination $dest -Force
     }
 
-    # no extra top-level folder and forward slashes = exactly what Factorio expects
+    # Factorio only finds info.json inside a "<name>_<version>/" folder at the
+    # archive root; a flat zip is rejected with "Mod package read error ...
+    # info.json not found". Entry names also have to use '/' not '\', and
+    # ZipFile::CreateFromDirectory must be avoided: on .NET Framework it writes
+    # '\' separators. Both assemblies are needed here - FileSystem brings in
+    # ZipFile, the plain System.IO.Compression assembly brings in ZipArchive.
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [IO.Compression.ZipFile]::CreateFromDirectory(
-        $tmpDir,
-        $tmpZip,
-        [IO.Compression.CompressionLevel]::Optimal,
-        $false,
-        [Text.Encoding]::UTF8)
+    Add-Type -AssemblyName System.IO.Compression
+    $prefix = $ModName + '_' + $ModVer
+    $zipStream = [IO.File]::Open($tmpZip, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $archive = New-Object IO.Compression.ZipArchive($zipStream, [IO.Compression.ZipArchiveMode]::Create, $true)
+        try {
+            foreach ($f in $files) {
+                $entryName = $prefix + '/' + $f.Rel.Replace('\', '/')
+                $entry = $archive.CreateEntry($entryName, [IO.Compression.CompressionLevel]::Optimal)
+                $entry.LastWriteTime = (Get-Item -LiteralPath $f.Full).LastWriteTime
+                $in = [IO.File]::OpenRead($f.Full)
+                try {
+                    $out = $entry.Open()
+                    try { $in.CopyTo($out) } finally { $out.Dispose() }
+                } finally { $in.Dispose() }
+            }
+        } finally { $archive.Dispose() }
+    } finally { $zipStream.Dispose() }
 
+    # verify the archive layout Factorio demands
     $archive = [IO.Compression.ZipFile]::OpenRead($tmpZip)
-    try { $entryCount = $archive.Entries.Count } finally { $archive.Dispose() }
+    try {
+        $entryNames = @($archive.Entries | ForEach-Object { $_.FullName })
+    } finally { $archive.Dispose() }
+    $entryCount = $entryNames.Count
+    $wrong = @($entryNames | Where-Object { $_.Contains('\') })
+    if ($wrong.Count -gt 0) { throw ('archive entry names contain backslashes: ' + ($wrong[0])) }
 } finally {
     if (Test-Path -LiteralPath $tmpDir) { Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 if ($entryCount -lt 2) { throw 'The produced archive looks empty - aborting.' }
+foreach ($must in @('info.json', 'control.lua')) {
+    if ($entryNames -notcontains ($prefix + '/' + $must)) {
+        throw ('The archive has no ' + $prefix + '/' + $must + ' - Factorio would not load it.')
+    }
+}
+Write-Info ('entries live under ' + $prefix + '/ - info.json is inside that folder')
 
 Move-Item -LiteralPath $tmpZip -Destination $OutputZip -Force
 $zipItem = Get-Item -LiteralPath $OutputZip
