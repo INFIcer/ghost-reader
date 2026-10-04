@@ -56,6 +56,41 @@ local function on_built_entity(event)
     end
 end
 
+---实体死亡后引擎自动放置的重建虚影。
+---研究「建设机器人」后，实体被摧毁时游戏会自动在它原来的位置放一个重建虚影；
+---这个虚影**不走任何 build 事件**（on_built_entity / on_robot_built_entity /
+---script_raised_* 都不触发），唯一暴露它的钩子是 on_post_entity_died 的 ghost 字段
+---（官方文档："The ghost created by the entity dying if any"）。
+---没有它，这批虚影就永远统计不到：重建时读不到，建好后才被 on_object_destroyed 摘掉。
+---登记方式与其它路径完全一致，复用 on_entity_ghost_built / on_tile_ghost_built。
+---@param event EventData.on_post_entity_died
+local function on_post_entity_died(event)
+    local ghost = event.ghost
+    --没有 ghost 字段=这次死亡没有留下重建虚影（未研究/无可重建物/被关闭），直接忽略
+    if not (ghost and ghost.valid) then return end
+    if ghost.type == "entity-ghost" then
+        on_entity_ghost_built(ghost)
+    elseif ghost.type == "tile-ghost" then
+        on_tile_ghost_built(ghost)
+    end
+end
+
+---被克隆出来的虚影（编辑器克隆、以及别的 mod 用 clone 造虚影）。
+---引擎侧克隆只走 on_entity_cloned（source = 原实体，destination = 克隆出来的那个），
+---同样不触发任何 build 事件，所以也要在这里补登记。
+---destination 不一定是虚影（普通实体的克隆也走这个事件），故按类型分发。
+---注意克隆出来的普通实体不是我们的计数目标——建设机器人任务只认虚影——所以直接忽略。
+---@param event EventData.on_entity_cloned
+local function on_entity_cloned(event)
+    local e = event.destination
+    if not (e and e.valid) then return end
+    if e.type == "entity-ghost" then
+        on_entity_ghost_built(e)
+    elseif e.type == "tile-ghost" then
+        on_tile_ghost_built(e)
+    end
+end
+
 ---@param event EventData.on_surface_created
 local function on_surface_created(event)
     region.ensure_region_surface(game.surfaces[event.surface_index])
@@ -482,6 +517,10 @@ function M.register()
     script.on_event(defines.events.on_robot_built_entity, on_built_entity)
     script.on_event(defines.events.script_raised_built, on_built_entity)
     script.on_event(defines.events.script_raised_revive, on_built_entity)
+    --实体死亡后引擎自动放置的重建虚影：只在这里给出，见 on_post_entity_died
+    script.on_event(defines.events.on_post_entity_died, on_post_entity_died)
+    --被克隆出来的虚影（编辑器克隆 / 其它 mod）：克隆同样不走 build 事件
+    script.on_event(defines.events.on_entity_cloned, on_entity_cloned)
 
 
     script.on_event(defines.events.on_object_destroyed, on_destroyed)
