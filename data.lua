@@ -37,19 +37,64 @@ local base_cc = data.raw["constant-combinator"]["constant-combinator"]
 -- A constant-combinator variant (same 1x1 size, read-only output, no power).
 local ghost_reader = deepcopy(base_cc)
 ghost_reader.name = "ghost-reader"
-ghost_reader.minable = {mining_time = 0.1, result = "ghost-reader"}
+ghost_reader.minable = { mining_time = 0.1, result = "ghost-reader" }
 ghost_reader.fast_replaceable_group = nil
-ghost_reader.flags = {"placeable-player", "player-creation"}
+ghost_reader.flags = { "placeable-player", "player-creation" }
 
 -- Use our own copies of the sprites / activity LEDs.
 redirect_sprites(ghost_reader)
 
-data:extend{ghost_reader}
+data:extend { ghost_reader }
+
+-- 面板（读取器 GUI）用的样式：数据阶段定义、全部继承原版样式，只写差异部分。
+-- 这样原版主题（贴图/配色/内边距/圆角）一改，我们的控件自动跟着变；运行期因此完全不需要
+-- 去写颜色和贴图路径——那才是版本脆弱性的主要来源。
+-- 样式名是全局命名空间，加前缀隔离；继承链见 data/core/prototypes/style.lua。
+local gui_styles = data.raw["gui-style"].default
+
+-- 面板顶栏「连接至：<单位号> ⓘ」那一行：原版实体面板顶栏是深色内嵌行
+gui_styles["gr_gui_panel_row"] = {
+  type = "frame_style",
+  parent = "subheader_frame",
+  top_margin = -8,
+  left_margin = -12,
+  right_margin = -12,
+  horizontally_stretchable = "on",
+  horizontally_squashable = "on",
+}
+
+-- 棋盘格实体预览区的外框（棋盘格与实体本身由 entity-preview 元素绘制）
+gui_styles["gr_gui_panel_preview"] = {
+  type = "frame_style",
+  horizontally_stretchable = "on",
+  height = 152,
+  natural_height = 152,
+  ignored_by_search = true,
+}
+
+-- 标题栏：原版把这些定义成 frame 里的匿名子样式（title_style / header_filler_style），
+-- 运行期取不到名字，所以照抄成具名样式。数值逐项来自 data/core/prototypes/style.lua=
+--   frame.title_style        = parent frame_title + top_margin -3 + bottom_padding 3
+--   frame.header_filler_style = parent draggable_space_header + 双向可伸展 + height 24
+gui_styles["gr_gui_window_title"] = {
+  type = "label_style",
+  parent = "frame_title",
+  top_margin = -3,
+  bottom_padding = 3
+}
+
+gui_styles["gr_gui_header_filler"] = {
+  type = "empty_widget_style",
+  parent = "draggable_space_header",
+  horizontally_stretchable = "on",
+  vertically_stretchable = "on",
+  height = 24
+}
 
 local icon = "__ghost-reader__/graphics/icons/constant-combinator.png"
 local icon_size = base_cc.icon_size or 64
 
-data:extend{
+data:extend {
   {
     type = "item",
     name = "ghost-reader",
@@ -66,11 +111,11 @@ data:extend{
     enabled = false,
     energy_required = 0.5,
     ingredients = {
-      {type = "item", name = "construction-robot", amount = 1},
-      {type = "item", name = "steel-chest", amount = 1}
+      { type = "item", name = "construction-robot", amount = 1 },
+      { type = "item", name = "steel-chest",        amount = 1 }
     },
     results = {
-      {type = "item", name = "ghost-reader", amount = 1}
+      { type = "item", name = "ghost-reader", amount = 1 }
     }
   },
   {
@@ -78,18 +123,18 @@ data:extend{
     name = "ghost-reader",
     icon = icon,
     icon_size = icon_size,
-    prerequisites = {"construction-robotics"},
+    prerequisites = { "construction-robotics" },
     unit = {
       count = 50,
       ingredients = {
-        {"automation-science-pack", 1},  -- 红瓶
-        {"logistic-science-pack", 1},    -- 绿瓶
-        {"chemical-science-pack", 1}     -- 蓝瓶
+        { "automation-science-pack", 1 }, -- 红瓶
+        { "logistic-science-pack", 1 },   -- 绿瓶
+        { "chemical-science-pack", 1 }    -- 蓝瓶
       },
       time = 30
     },
     effects = {
-      {type = "unlock-recipe", recipe = "ghost-reader"}
+      { type = "unlock-recipe", recipe = "ghost-reader" }
     }
   }
 }

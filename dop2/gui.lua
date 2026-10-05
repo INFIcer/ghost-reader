@@ -32,6 +32,22 @@ local GR_GUI_FILTER = "gr_gui_filter"
 local GR_GUI_COUNT = "gr_gui_count"
 local GR_GUI_QUALITY = "gr_gui_quality"
 local GR_GUI_CLOSE = "gr_gui_close"
+local GR_GUI_LINK_ROW = "gr_gui_link_row"
+local GR_GUI_LINK_VALUE = "gr_gui_link_value"
+local GR_GUI_LINK_INFO = "gr_gui_link_info"
+local GR_GUI_PREVIEW_BOX = "gr_gui_preview_box"
+local GR_GUI_PREVIEW = "gr_gui_preview"
+
+---「连接至」行尾的信息图标：直接用原版贴图原型 info_no_border（core 自带，不必自己切图）
+local GR_ICON_INFO = "info_no_border"
+
+---「连接至」行首文案：原版引擎面板用的就是这条 core 键，各语言自动跟随，无需自维护翻译
+local GR_LINK_CAPTION = { "gui-control-behavior.connected-to-network" }
+
+---预览区尺寸。entity-preview 的画面由引擎实时绘制（棋盘格 + 实体 + 它的红/绿接线），
+---尺寸只能通过样式给，集中在这里方便调。
+local GR_GUI_PREVIEW_WIDTH = 400
+local GR_GUI_PREVIEW_HEIGHT = 152
 
 --================================================================================================
 -- 枚举与下拉框选项
@@ -209,7 +225,6 @@ local function rebuild_table(table_element, counts)
                 icon.number = count
                 icon.style.width = 40
                 icon.style.height = 40
-                icon.style.padding = 4
             else
                 --贴图/样式不可用时退化成文本，保证信号内容始终看得见（否则整栏空白且无从判断）
                 pcall(table_element.add, {
@@ -293,6 +308,120 @@ local function counts_fingerprint(counts)
     return table.concat(parts, ";")
 end
 
+--================================================================================================
+-- 面板顶栏：连接信息 + 实体预览
+--================================================================================================
+--
+-- 「连接至：<单位号>」是原版实体面板顶栏的写法，读取器面板同样先说明这块面板属于哪个实体；
+-- 预览区用 entity-preview 元素：棋盘格背景、实体外观、实体身上的红/绿接线都由引擎实时绘制，
+-- Lua 侧只负责告诉它看哪个实体。
+-- （rendering.draw_* 只能画在世界里，ScriptRenderTarget 不接受 GUI 目标，所以「把渲染挂到
+-- 面板上」的唯一正确形态就是这个元素，不是自己拼接贴图。）
+
+---面板身份指纹：面板位置 -> 当前「连接至」显示的读取器单位号。
+---用位置而不是单位号做键：读取器虚影建成真实读取器后单位号会变，位置不变。
+---@type table<string,uint64>
+local identity_fingerprints = {}
+
+---面板位置键（tags 只支持基本类型，拼成字符串当表键）
+---@param frame LuaGuiElement
+---@return string
+local function panel_key(frame)
+    local tags = frame.tags
+    return tostring(tags.surface) .. ":" .. tostring(tags.x) .. ":" .. tostring(tags.y)
+end
+
+---「连接至」行的悬浮提示：内容全部来自原版数据（原型本地化名 + 表面名 + 坐标 + 原版状态名），
+---不引入自定义文案键，所以不需要维护任何翻译。
+---@param entity LuaEntity
+---@return LocalisedString
+local function link_tooltip(entity)
+    local text = {
+        "", { "entity-name." .. READER }, " #", tostring(entity.unit_number), "\n",
+        region.surface_name(entity.surface), "  ",
+        string.format("(%.0f, %.0f)", entity.position.x, entity.position.y),
+    }
+    if entity.type == "entity-ghost" then
+        text[#text + 1] = "  "
+        text[#text + 1] = { "entity-status.ghost" }
+    end
+    return text
+end
+
+---添加「连接至：<读取器单位号>」行：原版实体面板顶栏那一行是深色内嵌行。
+---样式（继承 inside_deep_frame + 内边距/居中）定义在数据阶段的 data.lua 里，
+---运行期只给样式名，不在这里改颜色或贴图。
+---@param parent LuaGuiElement
+---@param entity LuaEntity 读取器（真实实体或其虚影）
+local function add_link_row(parent, entity)
+    local row = parent.add { type = "frame", style = "gr_gui_panel_row", direction = "horizontal" }
+    row.name = GR_GUI_LINK_ROW
+    row.add { type = "label", caption = GR_LINK_CAPTION }
+    row.add { type = "label", name = GR_GUI_LINK_VALUE, caption = tostring(entity.unit_number) }
+    --ⓘ 紧跟数值（原版就是这样；把它推到行尾反而像个表单）
+    row.add {
+        type = "sprite", name = GR_GUI_LINK_INFO, sprite = GR_ICON_INFO, tooltip = link_tooltip(entity),
+    }
+end
+
+---添加棋盘格实体预览区（原版那块预览同样是深色内嵌框 + 引擎实时绘制的内容）
+---@param parent LuaGuiElement
+---@param entity LuaEntity|nil 要预览的实体，之后可用 preview.entity 换
+---@return LuaGuiElement preview
+local function add_entity_preview(parent, entity)
+    local box = parent.add {
+        type = "frame", name = GR_GUI_PREVIEW_BOX, style = "gr_gui_panel_preview",
+    }
+    --引擎元素：万一某个 2.1.x 版本没有 entity-preview，也只是没有预览区，不该让整个面板打不开
+    local ok, preview = pcall(box.add, { type = "entity-preview", name = GR_GUI_PREVIEW })
+    if not ok or not preview then return end
+    --entity-preview 的样式类型官方文档没给，故这里只做尺寸微调（LuaStyle 尺寸字段，属于官方用法）
+    preview.style.width = GR_GUI_PREVIEW_WIDTH
+    preview.entity = entity
+    return preview
+end
+
+---取预览元素（它在内嵌框里，不是内容区的直接子元素，所以要两层索引）
+---@param content LuaGuiElement
+---@return LuaGuiElement|nil
+local function preview_element(content)
+    local box = content[GR_GUI_PREVIEW_BOX]
+    if not (box and box.valid) then return nil end
+    local preview = box[GR_GUI_PREVIEW]
+    if preview and preview.valid then return preview end
+end
+
+---刷新顶栏（「连接至」+ 预览）：只在指向的读取器变化时才写 GUI。
+---虚影建成真实读取器后单位号会变，所以要跟着换；预览本身由引擎实时绘制，不需要重画。
+---@param frame LuaGuiElement
+---@param content LuaGuiElement
+---@param entity LuaEntity|nil 当前读取器；nil 表示读取器已不存在
+local function refresh_identity(frame, content, entity)
+    local key = panel_key(frame)
+    local preview = preview_element(content)
+    local unit = entity and entity.unit_number
+    if type(unit) ~= "number" then
+        --读取器已不存在（被挖掉/虚影被取消）：清掉预览指向的实体，别留一个失效引用。
+        --只在指纹还在时才清，避免读取器没了以后每帧都写一次 GUI。
+        if identity_fingerprints[key] then
+            identity_fingerprints[key] = nil
+            if preview then preview.entity = nil end
+        end
+        return
+    end
+    if identity_fingerprints[key] == unit then return end
+    identity_fingerprints[key] = unit
+    local row = content[GR_GUI_LINK_ROW]
+    if row and row.valid then
+        local value = row[GR_GUI_LINK_VALUE]
+        if value and value.valid then value.caption = tostring(unit) end
+        --虚影建成真实读取器后提示也要改（少一行「尚未建成」）
+        local info = row[GR_GUI_LINK_INFO]
+        if info and info.valid then info.tooltip = link_tooltip(entity) end
+    end
+    if preview then preview.entity = entity end
+end
+
 ---刷新一个玩家的面板（状态行 + 信号表）
 ---@param player LuaPlayer
 local function refresh_player(player)
@@ -302,7 +431,13 @@ local function refresh_player(player)
     if not (content and content.valid) then return end
     --读取器已不存在（虚影已建成真实读取器/已被挖掉）：面板留着但不再刷新
     local entity = frame_reader(frame)
-    if not entity then return end
+    if not entity then
+        --预览区要清掉，否则会指着一个失效实体
+        refresh_identity(frame, content, nil)
+        return
+    end
+    --顶栏：读取器换了（虚影建成真实读取器）就换「连接至」与预览
+    refresh_identity(frame, content, entity)
     local status = status_label(content)
     if status then status.caption = status_text(entity) end
     --虚影没有归属地与电路输出，但面板同样显示按位置预览的信号（与 dop1 一致）
@@ -328,16 +463,16 @@ local function build(player, entity)
         type = "frame", name = GR_GUI_FRAME, direction = "vertical", tags = pos_tag(entity),
     }
     frame.auto_center = true
-    frame.style.minimal_width = 260
+    frame.style.maximal_height = 1450
 
-    --标题栏：标题与空白区都带 drag_target，使整条标题栏可拖动窗口
-    local titlebar = frame.add { type = "flow" }
-    local title = titlebar.add { type = "label", style = "frame_title", caption = { "gr-gui.title" } }
+    --标题栏：结构与样式照原版 frame 的头栏（style.lua 的 frame_header_flow 与
+    --frame.header_filler_style，后者照抄成了具名的 gr_gui_header_filler）。
+    --标题与空白区都带 drag_target，使整条标题栏可拖动窗口。
+    local titlebar = frame.add { type = "flow", style = "frame_header_flow" }
+    local title = titlebar.add { type = "label", style = "gr_gui_window_title", caption = { "gr-gui.title" } }
     title.drag_target = frame
-    local drag_space = titlebar.add { type = "empty-widget", style = "draggable_space_header" }
+    local drag_space = titlebar.add { type = "empty-widget", style = "gr_gui_header_filler" }
     drag_space.drag_target = frame
-    drag_space.style.horizontally_stretchable = true
-    drag_space.style.height = 24
     titlebar.add {
         type = "sprite-button", name = GR_GUI_CLOSE, style = "frame_action_button",
         sprite = "utility/close", tooltip = { "gr-gui.close" },
@@ -345,15 +480,19 @@ local function build(player, entity)
 
     local content = frame.add {
         type = "frame", name = GR_GUI_CONTENT,
-        style = "inside_shallow_frame_with_padding", direction = "vertical",
+        style = "entity_frame", direction = "vertical",
     }
+    --顶栏：连接信息 + 实体预览（对齐原版实体面板：先说明属于哪个读取器，再给实时预览）
+    add_link_row(content, entity)
+    add_entity_preview(content, entity)
+    identity_fingerprints[panel_key(frame)] = unit
     add_dropdown_row(content, { "gr-gui.range-mode" }, GR_GUI_MODE, range_options(), config.get_mode(unit))
     add_status_row(content, { "gr-gui.current-range" }, status_text(entity))
     add_dropdown_row(content, { "gr-gui.filter" }, GR_GUI_FILTER, filter_options(), config.get_filter(unit))
     add_dropdown_row(content, { "gr-gui.qty" }, GR_GUI_COUNT, count_options(), config.get_count(unit))
     add_dropdown_row(content, { "gr-gui.quality" }, GR_GUI_QUALITY, quality_options(), config.get_quality(unit))
     content.add { type = "label", caption = { "gr-gui.output" }, style = "frame_subheading_label" }
-    content.add { type = "table", name = GR_GUI_TABLE, column_count = 6 }
+    content.add { type = "table", name = GR_GUI_TABLE, column_count = 10 }
     local counts = meta.output_of(entity)
     table_fingerprints[unit] = counts_fingerprint(counts)
     rebuild_table(content[GR_GUI_TABLE], counts)
@@ -495,11 +634,11 @@ function M.update_tooltip(reader)
     local done = pcall(function()
         reader.clear_tooltip_fields()
         local fields = {
-            { { "gr-tooltip.range-mode" }, locale_of(range_options(), mode) },
+            { { "gr-tooltip.range-mode" },    locale_of(range_options(), mode) },
             { { "gr-tooltip.current-range" }, status_text(reader, m) },
-            { { "gr-tooltip.filter" }, locale_of(filter_options(), filter) },
-            { { "gr-tooltip.qty" }, locale_of(count_options(), count) },
-            { { "gr-tooltip.quality" }, locale_of(quality_options(), quality) },
+            { { "gr-tooltip.filter" },        locale_of(filter_options(), filter) },
+            { { "gr-tooltip.qty" },           locale_of(count_options(), count) },
+            { { "gr-tooltip.quality" },       locale_of(quality_options(), quality) },
         }
         for index, field in ipairs(fields) do
             reader.set_tooltip_field { name = field[1], value = field[2], order = 50 + index }
