@@ -24,6 +24,7 @@ local M = {}
 ---GUI 元素名
 local GR_GUI_FRAME = "gr_gui_frame"
 local GR_GUI_CONTENT = "gr_gui_content"
+local GR_GUI_TABLE_FRAME = "gr_gui_table_frame"
 local GR_GUI_TABLE = "gr_gui_table"
 local GR_GUI_STATUS = "gr_gui_status"
 local GR_GUI_STATUS_ROW = "gr_gui_status_row"
@@ -43,7 +44,7 @@ local GR_ICON_INFO = "info_no_border"
 
 ---「连接至」行首文案：原版引擎面板用的就是这条 core 键，各语言自动跟随，无需自维护翻译
 local GR_LINK_CAPTION = { "gui-control-behavior.connected-to-network" }
-
+local NOT_IN_LOGISTIC_NETWORK = { "not-in-logistic-network" }
 ---预览区尺寸。entity-preview 的画面由引擎实时绘制（棋盘格 + 实体 + 它的红/绿接线），
 ---尺寸只能通过样式给，集中在这里方便调。
 local GR_GUI_PREVIEW_WIDTH = 400
@@ -110,7 +111,8 @@ local function quality_options()
 
         local options = { { { "gr-gui.quality-all" }, QUALITY_ALL } }
         for _, quality in ipairs(qualities) do
-            options[#options + 1] = { quality.localised_name or { "", quality.name }, quality.name }
+            options[#options + 1] = { { "", "[img=quality." .. quality.name .. "]", quality.localised_name }, quality
+                .name }
         end
         quality_options_cache = options
     end
@@ -219,12 +221,12 @@ local function rebuild_table(table_element, counts)
                 sprite = "item/" .. item,
                 --非普通品质加左下角品质角标（原版风格：normal 不显示角标）
                 quality = quality ~= "normal" and quality or nil,
-                tooltip = signal_tooltip(item, quality, count),
             })
             if ok and icon then
                 icon.number = count
                 icon.style.width = 40
                 icon.style.height = 40
+                icon.style.padding = 4
             else
                 --贴图/样式不可用时退化成文本，保证信号内容始终看得见（否则整栏空白且无从判断）
                 pcall(table_element.add, {
@@ -241,9 +243,10 @@ end
 ---@param caption LocalisedString
 ---@return LuaGuiElement flow
 local function add_row(parent, caption)
-    local flow = parent.add { type = "flow", direction = "horizontal" }
-    flow.add { type = "label", caption = caption }
+    local flow = parent.add { type = "flow", style = "player_input_horizontal_flow" }
+    flow.add { type = "label", caption = caption, style = "caption_label" }
     flow.add { type = "empty-widget" }.style.horizontally_stretchable = true
+    flow.style.vertical_align = "center"
     return flow
 end
 
@@ -265,7 +268,7 @@ local function add_dropdown_row(parent, caption, name, options, selected)
     local dropdown = flow.add {
         type = "drop-down", name = name, items = items, selected_index = selected_index,
     }
-    dropdown.style.width = 170
+    dropdown.style.width = 200
 end
 
 ---添加一行状态文本
@@ -356,12 +359,10 @@ end
 local function add_link_row(parent, entity)
     local row = parent.add { type = "frame", style = "gr_gui_panel_row", direction = "horizontal" }
     row.name = GR_GUI_LINK_ROW
-    row.add { type = "label", caption = GR_LINK_CAPTION }
-    row.add { type = "label", name = GR_GUI_LINK_VALUE, caption = tostring(entity.unit_number) }
-    --ⓘ 紧跟数值（原版就是这样；把它推到行尾反而像个表单）
-    row.add {
-        type = "sprite", name = GR_GUI_LINK_INFO, sprite = GR_ICON_INFO, tooltip = link_tooltip(entity),
-    }
+    row.add { type = "label", style = "subheader_label", caption = GR_LINK_CAPTION }
+    local t = row.add { type = "label", name = GR_GUI_LINK_VALUE,
+        caption = tostring(entity.unit_number) .. " [img=info]",
+        tooltip = link_tooltip(entity) }
 end
 
 ---添加棋盘格实体预览区（原版那块预览同样是深色内嵌框 + 引擎实时绘制的内容）
@@ -369,27 +370,13 @@ end
 ---@param entity LuaEntity|nil 要预览的实体，之后可用 preview.entity 换
 ---@return LuaGuiElement preview
 local function add_entity_preview(parent, entity)
-    local box = parent.add {
-        type = "frame", name = GR_GUI_PREVIEW_BOX, style = "gr_gui_panel_preview",
-    }
     --引擎元素：万一某个 2.1.x 版本没有 entity-preview，也只是没有预览区，不该让整个面板打不开
-    local ok, preview = pcall(box.add, { type = "entity-preview", name = GR_GUI_PREVIEW })
-    if not ok or not preview then return end
-    --entity-preview 的样式类型官方文档没给，故这里只做尺寸微调（LuaStyle 尺寸字段，属于官方用法）
-    preview.style.width = GR_GUI_PREVIEW_WIDTH
+    local frame = parent.add { type = "frame", style = "deep_frame_in_shallow_frame" }
+    local preview = frame.add { type = "entity-preview", style = "wide_entity_button", name = GR_GUI_PREVIEW }
     preview.entity = entity
     return preview
 end
 
----取预览元素（它在内嵌框里，不是内容区的直接子元素，所以要两层索引）
----@param content LuaGuiElement
----@return LuaGuiElement|nil
-local function preview_element(content)
-    local box = content[GR_GUI_PREVIEW_BOX]
-    if not (box and box.valid) then return nil end
-    local preview = box[GR_GUI_PREVIEW]
-    if preview and preview.valid then return preview end
-end
 
 ---刷新顶栏（「连接至」+ 预览）：只在指向的读取器变化时才写 GUI。
 ---虚影建成真实读取器后单位号会变，所以要跟着换；预览本身由引擎实时绘制，不需要重画。
@@ -398,17 +385,8 @@ end
 ---@param entity LuaEntity|nil 当前读取器；nil 表示读取器已不存在
 local function refresh_identity(frame, content, entity)
     local key = panel_key(frame)
-    local preview = preview_element(content)
     local unit = entity and entity.unit_number
-    if type(unit) ~= "number" then
-        --读取器已不存在（被挖掉/虚影被取消）：清掉预览指向的实体，别留一个失效引用。
-        --只在指纹还在时才清，避免读取器没了以后每帧都写一次 GUI。
-        if identity_fingerprints[key] then
-            identity_fingerprints[key] = nil
-            if preview then preview.entity = nil end
-        end
-        return
-    end
+
     if identity_fingerprints[key] == unit then return end
     identity_fingerprints[key] = unit
     local row = content[GR_GUI_LINK_ROW]
@@ -419,7 +397,6 @@ local function refresh_identity(frame, content, entity)
         local info = row[GR_GUI_LINK_INFO]
         if info and info.valid then info.tooltip = link_tooltip(entity) end
     end
-    if preview then preview.entity = entity end
 end
 
 ---刷新一个玩家的面板（状态行 + 信号表）
@@ -446,7 +423,7 @@ local function refresh_player(player)
     local fingerprint = counts_fingerprint(counts)
     if table_fingerprints[unit] ~= fingerprint then
         table_fingerprints[unit] = fingerprint
-        rebuild_table(content[GR_GUI_TABLE], counts)
+        rebuild_table(content[GR_GUI_TABLE_FRAME][GR_GUI_TABLE], counts)
     end
 end
 
@@ -491,11 +468,15 @@ local function build(player, entity)
     add_dropdown_row(content, { "gr-gui.filter" }, GR_GUI_FILTER, filter_options(), config.get_filter(unit))
     add_dropdown_row(content, { "gr-gui.qty" }, GR_GUI_COUNT, count_options(), config.get_count(unit))
     add_dropdown_row(content, { "gr-gui.quality" }, GR_GUI_QUALITY, quality_options(), config.get_quality(unit))
-    content.add { type = "label", caption = { "gr-gui.output" }, style = "frame_subheading_label" }
-    content.add { type = "table", name = GR_GUI_TABLE, column_count = 10 }
+    content.add { type = "line" }
+    local table_flow = content.add { type = "scroll-pane", name = GR_GUI_TABLE_FRAME, style = "deep_slots_scroll_pane" }
+    local frame = table_flow.add { type = "frame", style = "logistic_section_subheader_frame" }
+    frame.style.width = GR_GUI_PREVIEW_WIDTH
+    frame.add { type = "label", caption = { "gr-gui.output" }, style = "subheader_label" }
+    table_flow.add { type = "table", name = GR_GUI_TABLE, style = "gr_table", column_count = 10 }
     local counts = meta.output_of(entity)
     table_fingerprints[unit] = counts_fingerprint(counts)
-    rebuild_table(content[GR_GUI_TABLE], counts)
+    rebuild_table(table_flow[GR_GUI_TABLE], counts)
 
     player.opened = frame
 end

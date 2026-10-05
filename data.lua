@@ -63,6 +63,20 @@ gui_styles["gr_gui_panel_row"] = {
   horizontally_squashable = "on",
 }
 
+gui_styles["gr_subheader_frame"] = {
+  type = "frame_style",
+  parent = "inside_shallow_frame",
+  vertically_stretchable = "on",
+}
+
+gui_styles["gr_table"] = {
+  type = "table_style",
+  horizontal_spacing = 0,
+  vertical_spacing = 0,
+  horizontally_stretchable = "on",
+  vertically_stretchable = "on",
+}
+
 -- 棋盘格实体预览区的外框（棋盘格与实体本身由 entity-preview 元素绘制）
 gui_styles["gr_gui_panel_preview"] = {
   type = "frame_style",
