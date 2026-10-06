@@ -18,13 +18,25 @@ end
 
 -- Rewrite every constant-combinator sprite/icon filename so the entity uses
 -- copies stored inside this mod instead of the vanilla files.
+--
+-- Two conditions must hold for a path to be rewritten:
+--   * it lives under the vanilla combinator sprite folder, and
+--   * it is one of OUR sprites, i.e. its file name contains "constant-combinator".
+-- The second test matters: the same folder also holds sprites shared by the
+-- other combinators (e.g. combinator/combinators-reflection.png), which this mod
+-- deliberately does not copy and therefore must keep pointing at __base__.
+-- Note that "constant-combinator" also covers the remnant sheet, whose path is
+-- combinator/remnants/constant/constant-combinator-remnants.png.
 local function redirect_sprites(t)
   for k, v in pairs(t) do
-    if (k == "filename" or k == "icon") and type(v) == "string" then
-      if v:find("graphics/entity/combinator/constant%-combinator") then
+    if type(v) == "string" then
+      if v:find("__base__/graphics/entity/combinator/", 1, true)
+        and v:find("constant-combinator", 1, true) then
         t[k] = v:gsub("__base__/graphics/entity/combinator/", "__ghost-reader__/graphics/entities/")
-      elseif v:find("graphics/icons/constant%-combinator") then
+      elseif v:find("__base__/graphics/icons/constant-combinator", 1, true) then
         t[k] = v:gsub("__base__/graphics/icons/", "__ghost-reader__/graphics/icons/")
+      elseif v == "entity-name.constant-combinator" then
+        t[k] = "entity-name.ghost-reader"
       end
     elseif type(v) == "table" then
       redirect_sprites(v)
@@ -33,18 +45,27 @@ local function redirect_sprites(t)
 end
 
 local base_cc = data.raw["constant-combinator"]["constant-combinator"]
-
+local base_ccr = data.raw["corpse"]["constant-combinator-remnants"]
 -- A constant-combinator variant (same 1x1 size, read-only output, no power).
+---@type ConstantCombinatorPrototype
 local ghost_reader = deepcopy(base_cc)
 ghost_reader.name = "ghost-reader"
 ghost_reader.minable = { mining_time = 0.1, result = "ghost-reader" }
 ghost_reader.fast_replaceable_group = nil
 ghost_reader.flags = { "placeable-player", "player-creation" }
+-- The prototype field is `corpse` (EntityWithHealthPrototype) and it takes one
+-- EntityID or an array of them. `corpses` is a *runtime* read-only property on
+-- LuaEntity, not a prototype key: setting it in the data stage does not bind
+-- anything, so the copy kept the inherited vanilla corpse
+-- "constant-combinator-remnants" (and with it the vanilla remnant texture).
+ghost_reader.corpse = "ghost-reader-remnants"
 
+local ghost_reader_remnants = deepcopy(base_ccr)
+ghost_reader_remnants.name = "ghost-reader-remnants"
 -- Use our own copies of the sprites / activity LEDs.
 redirect_sprites(ghost_reader)
-
-data:extend { ghost_reader }
+redirect_sprites(ghost_reader_remnants)
+data:extend { ghost_reader, ghost_reader_remnants }
 
 -- 面板（读取器 GUI）用的样式：数据阶段定义、全部继承原版样式，只写差异部分。
 -- 这样原版主题（贴图/配色/内边距/圆角）一改，我们的控件自动跟着变；运行期因此完全不需要
