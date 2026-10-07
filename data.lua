@@ -31,7 +31,7 @@ local function redirect_sprites(t)
   for k, v in pairs(t) do
     if type(v) == "string" then
       if v:find("__base__/graphics/entity/combinator/", 1, true)
-        and v:find("constant-combinator", 1, true) then
+          and v:find("constant-combinator", 1, true) then
         t[k] = v:gsub("__base__/graphics/entity/combinator/", "__ghost-reader__/graphics/entities/")
       elseif v:find("__base__/graphics/icons/constant-combinator", 1, true) then
         t[k] = v:gsub("__base__/graphics/icons/", "__ghost-reader__/graphics/icons/")
@@ -147,7 +147,7 @@ data:extend {
     energy_required = 0.5,
     ingredients = {
       { type = "item", name = "construction-robot", amount = 1 },
-      { type = "item", name = "steel-chest",        amount = 1 }
+      { type = "item", name = "copper-cable",       amount = 5 }
     },
     results = {
       { type = "item", name = "ghost-reader", amount = 1 }

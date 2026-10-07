@@ -1,6 +1,6 @@
 # Ghost Reader
 
-**Version 1.2.1** · Requires Factorio 2.1 (including Space Age)
+**Version 1.2.2** · Requires Factorio 2.1 (including Space Age)
 
 In vanilla Factorio, the tasks of construction robots cannot be read as circuit signals, yet this is crucial for automating construction. This mod focuses on solving that. It adds a new entity that reads the ghost requests within the whole surface or its logistics network and outputs them as circuit signals, fully configurable via a GUI. It supports adjusting the filter mode (entities | tiles | upgrades | items), the quantity mode (supply requests | recycling requests), and quality filtering.
 
@@ -19,7 +19,7 @@ It reads four kinds of requests and tracks them in two directions — **supply**
 | Entities | Ghost of an entity to be built | Entity marked for deconstruction |
 | Tiles | Ghost of a tile to be placed | Tile marked for deconstruction |
 | Upgrades | The upgraded target entity | The original entity replaced by the upgrade |
-| Items | Requested items to deliver | Items already inside a deconstructed entity (including modules), storage-slot recycling requests (remove items), recycling products of environment entities (trees/fish/rocks...), on-ground items |
+| Items | Requested items to deliver | Items already inside a deconstructed entity, storage-slot recycling requests, recycling products of environment entities (trees/fish/rocks...), on-ground items |
 
 > **About "Items"**: here, "items" refers to item requests produced when you perform a **ghost operation on an entity's storage slots** (set directly in remote view), which are served by **construction robots**. It does **not** refer to the item-logistics requests served by logistics robots.
 
@@ -62,7 +62,7 @@ It reads four kinds of requests and tracks them in two directions — **supply**
 - In **logistics network mode**, the reader itself must be inside some roboport's **supply area** (the orange area) to be considered "in a logistics network".
 - Targets belonging to **neutral/enemy forces** (trees, rocks, on-ground items, biter nests...) have no logistics network of their own; they are attributed by position to the player-force networks covering them. Entities of a player force only use their own force's construction areas.
 - Item requests on moving entities (e.g. tanks, spidertrons) are counted as well.
-- If a container entity (e.g. a chest) is marked for deconstruction, the items/modules **already inside it** are classified under the "items" category as recycling, and its temporary item requests are voided (not double-counted).
+- If a container entity (e.g. a chest) is marked for deconstruction, the items **already inside it** are classified under the "items" category as recycling.
 
 ---
 
@@ -72,12 +72,12 @@ This section is for developers who want to quickly understand the mod's structur
 
 ## Structure overview
 
-- **data.lua** — declares the new entity. It copies the vanilla constant-combinator prototype into a same-named custom entity and redirects its internal sprite references to graphics shipped inside this mod (no dependency on `__base__`), then registers the corresponding item, recipe, and technology.
+- **data.lua** — declares the new entity. It copies the vanilla constant-combinator prototype into a same-named custom entity and redirects its internal sprite references to graphics shipped inside this mod (no dependency on `__base__`); it also copies its own corpse prototype (`ghost-reader-remnants`) and binds it to the entity with the `corpse` field, then registers the corresponding item, recipe, and technology.
 - **data-updates.lua** — prepares reading of "item requests". It attaches a creation effect to the vanilla item-request-proxy prototype so that every such entity sends a script event when created.
 - **control.lua** — the **entry file**: it requires the modules under `dop2/` in dependency order, injects the cross-module dependency, and finally calls `events.register()`.
 - **dop2/** — all runtime logic, split into 14 modules by responsibility (see "File structure").
 
-> The `dop/` directory holds the pre-refactor implementation as a backup; it is not loaded. To go back, copy `control_dop.lua` over `control.lua`.
+> The `dop/` directory holds the pre-refactor implementation as a backup; it is not loaded.
 
 ## Modules (dop2/)
 
@@ -174,6 +174,8 @@ The mod prefers event-driven updates over per-frame polling:
 - **`require` may only be called while control.lua is being parsed**; calling it at runtime raises `Require can't be used outside of control.lua parsing`. Since `meta` and `snapshot` depend on each other, the entry injects it with `meta.inject_snapshot(snapshot)` after both are loaded instead of requiring lazily inside a function.
 - **`LuaLogisticSection.filters_count` is "how many filters this section currently has", not its slot capacity** (it is 0 after clearing); a constant-combinator section caps at 1000 slots and `set_slot` beyond that raises an error.
 - **Coordinates in bplib events use its internal array form `{x, y}`** (its type annotation says `MapPosition`, which is easy to trip over); accept both forms.
+- **The field binding an entity's remnants is `corpse`, not `corpses`**: `corpse` is a data-stage `EntityWithHealthPrototype` field (it takes one EntityID or a list of them), whereas `corpses` is a **read-only property** on the runtime `LuaEntity` (a dictionary indexed by corpse prototype name). Writing `corpses = "..."` at the data stage raises no error, but it binds nothing either — so a copied entity keeps using the original corpse of the prototype it was copied from.
+- **Remnant sprites are not directly under `graphics/entity/combinator/`**: the vanilla constant-combinator remnants live at `graphics/entity/combinator/remnants/constant/constant-combinator-remnants.png`. A redirect matching only `combinator/constant-combinator*` misses it; but you cannot simply point the whole `combinator/` directory at this mod either — that directory also holds `combinators-reflection.png` (the water reflection shared by all arithmetic combinators), which this mod does not ship and which must keep pointing at `__base__`. The matching rule is therefore "under `__base__/graphics/entity/combinator/` **and** the path contains `constant-combinator`".
 
 ## File structure
 

@@ -54,12 +54,12 @@ end
 ---@return LocalisedString
 local function surface_name(surface)
     if surface.planet then
-        return { "", "[img=space-location." .. surface.planet.name .. "]", surface.planet.prototype
+        return { "", "[img=space-location." .. surface.planet.name .. "] ", surface.planet.prototype
             .localised_name }
     end
     if surface.platform then
         return { "",
-            "[img=surface.space-platform]" ..
+            "[img=surface.space-platform] " ..
             surface.platform.name }
     end
     return { "", surface.name }
@@ -71,7 +71,7 @@ function region:name()
     if self.surface then
         return surface_name(self.surface)
     else
-        local icon = "[img=item.roboport]"
+        local icon = "[img=item.roboport] "
         if self.logistic_network.custom_name then return { "", icon, self.logistic_network.custom_name } end
         return { "", icon, { "gr-gui.network-prefix" }, tostring(self.logistic_network.network_id) }
     end

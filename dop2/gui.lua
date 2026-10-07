@@ -61,8 +61,8 @@ local GR_GUI_PREVIEW_HEIGHT = 152
 ---@return table[]
 local function range_options()
     return {
-        { { "gr-gui.mode-surface" }, range_mode.SURFACE },
-        { { "gr-gui.mode-network" }, range_mode.NETWORK },
+        { { "gr-gui.mode-surface" }, range_mode.SURFACE, { "gr-gui.mode-surface-tooltip" } },
+        { { "gr-gui.mode-network" }, range_mode.NETWORK, { "gr-gui.mode-network-tooltip" } },
     }
 end
 
@@ -70,11 +70,11 @@ end
 ---@return table[]
 local function filter_options()
     return {
-        { { "gr-gui.filter-all" },      filter_mode.ALL },
-        { { "gr-gui.filter-entity" },   filter_mode.ENTITY },
-        { { "gr-gui.filter-tiles" },    filter_mode.TILES },
-        { { "gr-gui.filter-upgrades" }, filter_mode.UPGRADES },
-        { { "gr-gui.filter-items" },    filter_mode.ITEMS },
+        { { "gr-gui.filter-all" },      filter_mode.ALL,      { "gr-gui.filter-all-tooltip" } },
+        { { "gr-gui.filter-entity" },   filter_mode.ENTITY,   { "gr-gui.filter-entity-tooltip" } },
+        { { "gr-gui.filter-tiles" },    filter_mode.TILES,    { "gr-gui.filter-tiles-tooltip" } },
+        { { "gr-gui.filter-upgrades" }, filter_mode.UPGRADES, { "gr-gui.filter-upgrades-tooltip" } },
+        { { "gr-gui.filter-items" },    filter_mode.ITEMS,    { "gr-gui.filter-items-tooltip" } },
     }
 end
 
@@ -82,9 +82,9 @@ end
 ---@return table[]
 local function count_options()
     return {
-        { { "gr-gui.qty-net" },     count_mode.NET },
-        { { "gr-gui.qty-supply" },  count_mode.SUPPLY },
-        { { "gr-gui.qty-recycle" }, count_mode.RECYCLE },
+        { { "gr-gui.qty-net" },     count_mode.NET,     { "gr-gui.qty-net-tooltip" } },
+        { { "gr-gui.qty-supply" },  count_mode.SUPPLY,  { "gr-gui.qty-supply-tooltip" } },
+        { { "gr-gui.qty-recycle" }, count_mode.RECYCLE, { "gr-gui.qty-recycle-tooltip" } },
     }
 end
 
@@ -111,7 +111,7 @@ local function quality_options()
 
         local options = { { { "gr-gui.quality-all" }, QUALITY_ALL } }
         for _, quality in ipairs(qualities) do
-            options[#options + 1] = { { "", "[img=quality." .. quality.name .. "]", quality.localised_name }, quality
+            options[#options + 1] = { { "", "[img=quality." .. quality.name .. "] ", quality.localised_name }, quality
                 .name }
         end
         quality_options_cache = options
@@ -172,9 +172,8 @@ end
 
 ---读取器当前范围的显示文本：归属地名 / 表面名 / 不在物流网络内
 ---@param entity LuaEntity
----@param m meta|nil 读取器元信息（虚影没有）
 ---@return LocalisedString
-local function status_text(entity, m)
+local function status_text(entity)
     --归属地可能已失效（如物流网络被合并/拆除而归属地尚未重新解析），此时不能读它的名字
     local reader_region = meta.region_of(entity)
     if reader_region and reader_region:vaild() then return reader_region:name() end
@@ -227,12 +226,12 @@ local function rebuild_table(table_element, counts)
                 icon.style.width = 40
                 icon.style.height = 40
                 icon.style.padding = 4
-            else
-                --贴图/样式不可用时退化成文本，保证信号内容始终看得见（否则整栏空白且无从判断）
-                pcall(table_element.add, {
-                    type = "label",
-                    caption = signal_tooltip(item, quality, count),
-                })
+                -- else
+                --     --贴图/样式不可用时退化成文本，保证信号内容始终看得见（否则整栏空白且无从判断）
+                --     pcall(table_element.add, {
+                --         type = "label",
+                --         caption = signal_tooltip(item, quality, count),
+                --     })
             end
         end
     end
@@ -269,6 +268,9 @@ local function add_dropdown_row(parent, caption, name, options, selected)
         type = "drop-down", name = name, items = items, selected_index = selected_index,
     }
     dropdown.style.width = 200
+    if #(options[selected_index]) > 2 then
+        dropdown.tooltip = options[selected_index][3]
+    end
 end
 
 ---添加一行状态文本
@@ -334,35 +336,25 @@ local function panel_key(frame)
     return tostring(tags.surface) .. ":" .. tostring(tags.x) .. ":" .. tostring(tags.y)
 end
 
----「连接至」行的悬浮提示：内容全部来自原版数据（原型本地化名 + 表面名 + 坐标 + 原版状态名），
----不引入自定义文案键，所以不需要维护任何翻译。
----@param entity LuaEntity
----@return LocalisedString
-local function link_tooltip(entity)
-    local text = {
-        "", { "entity-name." .. READER }, " #", tostring(entity.unit_number), "\n",
-        region.surface_name(entity.surface), "  ",
-        string.format("(%.0f, %.0f)", entity.position.x, entity.position.y),
-    }
-    if entity.type == "entity-ghost" then
-        text[#text + 1] = "  "
-        text[#text + 1] = { "entity-status.ghost" }
-    end
-    return text
-end
 
----添加「连接至：<读取器单位号>」行：原版实体面板顶栏那一行是深色内嵌行。
----样式（继承 inside_deep_frame + 内边距/居中）定义在数据阶段的 data.lua 里，
----运行期只给样式名，不在这里改颜色或贴图。
+
 ---@param parent LuaGuiElement
 ---@param entity LuaEntity 读取器（真实实体或其虚影）
 local function add_link_row(parent, entity)
     local row = parent.add { type = "frame", style = "gr_gui_panel_row", direction = "horizontal" }
     row.name = GR_GUI_LINK_ROW
-    row.add { type = "label", style = "subheader_label", caption = GR_LINK_CAPTION }
-    local t = row.add { type = "label", name = GR_GUI_LINK_VALUE,
-        caption = tostring(entity.unit_number) .. " [img=info]",
-        tooltip = link_tooltip(entity) }
+    local st = status_text(entity)
+
+    row.add { type = "label", style = "subheader_label", caption = { "gr-gui.status-range" } }
+    row.add { type = "label", name = GR_GUI_LINK_VALUE, caption = st, }
+end
+
+local function update_link_row(content, entity)
+    local row = content[GR_GUI_LINK_ROW]
+    if row and row.valid then
+        local value = row[GR_GUI_LINK_VALUE]
+        if value and value.valid then value.caption = status_text(entity) end
+    end
 end
 
 ---添加棋盘格实体预览区（原版那块预览同样是深色内嵌框 + 引擎实时绘制的内容）
@@ -371,7 +363,7 @@ end
 ---@return LuaGuiElement preview
 local function add_entity_preview(parent, entity)
     --引擎元素：万一某个 2.1.x 版本没有 entity-preview，也只是没有预览区，不该让整个面板打不开
-    local frame = parent.add { type = "frame", style = "deep_frame_in_shallow_frame" }
+    local frame = parent.add { type = "frame", style = "deep_frame_in_shallow_frame", name = GR_GUI_PREVIEW_BOX }
     local preview = frame.add { type = "entity-preview", style = "wide_entity_button", name = GR_GUI_PREVIEW }
     preview.entity = entity
     return preview
@@ -389,13 +381,11 @@ local function refresh_identity(frame, content, entity)
 
     if identity_fingerprints[key] == unit then return end
     identity_fingerprints[key] = unit
-    local row = content[GR_GUI_LINK_ROW]
-    if row and row.valid then
-        local value = row[GR_GUI_LINK_VALUE]
-        if value and value.valid then value.caption = tostring(unit) end
-        --虚影建成真实读取器后提示也要改（少一行「尚未建成」）
-        local info = row[GR_GUI_LINK_INFO]
-        if info and info.valid then info.tooltip = link_tooltip(entity) end
+
+    local preview_box = content[GR_GUI_PREVIEW_BOX]
+    if preview_box and preview_box.valid then
+        local preview = preview_box[GR_GUI_PREVIEW]
+        preview.entity = entity
     end
 end
 
@@ -410,13 +400,20 @@ local function refresh_player(player)
     local entity = frame_reader(frame)
     if not entity then
         --预览区要清掉，否则会指着一个失效实体
-        refresh_identity(frame, content, nil)
+        frame.destroy()
         return
     end
     --顶栏：读取器换了（虚影建成真实读取器）就换「连接至」与预览
     refresh_identity(frame, content, entity)
-    local status = status_label(content)
-    if status then status.caption = status_text(entity) end
+
+    -- local row = content[GR_GUI_LINK_ROW]
+    -- if row and row.valid then
+    --     local value = row[GR_GUI_LINK_VALUE]
+    --     if value and value.valid then value.caption = status_text(entity) end
+    -- end
+    update_link_row(content, entity)
+    --local status = status_label(content)
+    --if status then status.caption = status_text(entity) end
     --虚影没有归属地与电路输出，但面板同样显示按位置预览的信号（与 dop1 一致）
     local counts = meta.output_of(entity)
     local unit = entity.unit_number
@@ -464,7 +461,7 @@ local function build(player, entity)
     add_entity_preview(content, entity)
     identity_fingerprints[panel_key(frame)] = unit
     add_dropdown_row(content, { "gr-gui.range-mode" }, GR_GUI_MODE, range_options(), config.get_mode(unit))
-    add_status_row(content, { "gr-gui.current-range" }, status_text(entity))
+    --add_status_row(content, { "gr-gui.current-range" }, status_text(entity))
     add_dropdown_row(content, { "gr-gui.filter" }, GR_GUI_FILTER, filter_options(), config.get_filter(unit))
     add_dropdown_row(content, { "gr-gui.qty" }, GR_GUI_COUNT, count_options(), config.get_count(unit))
     add_dropdown_row(content, { "gr-gui.quality" }, GR_GUI_QUALITY, quality_options(), config.get_quality(unit))
@@ -563,6 +560,10 @@ function M.on_gui_selection_state_changed(event)
         config.set_quality(unit, option[2])
     end
 
+    if #option > 2 then
+        element.tooltip = option[3]
+    end
+
     local m = meta.get_meta_of(reader)
     if m and reader.name == READER then
         --范围模式改变读取的归属地类型，需要重新解析归属地；其余只需重写输出
@@ -616,7 +617,7 @@ function M.update_tooltip(reader)
         reader.clear_tooltip_fields()
         local fields = {
             { { "gr-tooltip.range-mode" },    locale_of(range_options(), mode) },
-            { { "gr-tooltip.current-range" }, status_text(reader, m) },
+            { { "gr-tooltip.current-range" }, status_text(reader) },
             { { "gr-tooltip.filter" },        locale_of(filter_options(), filter) },
             { { "gr-tooltip.qty" },           locale_of(count_options(), count) },
             { { "gr-tooltip.quality" },       locale_of(quality_options(), quality) },
