@@ -12,6 +12,10 @@ COUNT_DECON_INSTANT = "deconstruction-instant"      --瞬间拆除的实体（�
 ---@type string
 COUNT_DECON_TILE = "deconstruction-tile"            --被拆地格（地格类别回收；由 deconstructible-tile-proxy 代表）
 ---@type string
+COUNT_TILE_GHOST_RECYCLE = "tile-ghost-recycle"     --地格虚影覆盖的可回收地格：引擎不为它建拆除代理，需在地格虚影上补记
+---@type string
+COUNT_DECON_CLIFF = "deconstruction-cliff"          --被拆悬崖：拆除消耗的悬崖炸药，记为物品类别供给
+---@type string
 COUNT_IRP_PREFIX = "irp"                            --IRP 计数项前缀（后接 IRP 的注册号）
 
 ---品质筛选的"全部"取值。品质筛选的其余取值是品质原型名（LuaQualityPrototype.name）。

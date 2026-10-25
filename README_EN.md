@@ -1,6 +1,6 @@
 # Ghost Reader
 
-**Version 1.2.2** · Requires Factorio 2.1 (including Space Age)
+**Version 1.2.3** · Requires Factorio 2.1 (including Space Age)
 
 In vanilla Factorio, the tasks of construction robots cannot be read as circuit signals, yet this is crucial for automating construction. This mod focuses on solving that. It adds a new entity that reads the ghost requests within the whole surface or its logistics network and outputs them as circuit signals, fully configurable via a GUI. It supports adjusting the filter mode (entities | tiles | upgrades | items), the quantity mode (supply requests | recycling requests), and quality filtering.
 
@@ -17,9 +17,9 @@ It reads four kinds of requests and tracks them in two directions — **supply**
 | Type | Supply | Recycling (to be deconstructed/recovered) |
 | ---- | ---- | ---- |
 | Entities | Ghost of an entity to be built | Entity marked for deconstruction |
-| Tiles | Ghost of a tile to be placed | Tile marked for deconstruction |
+| Tiles | Ghost of a tile to be placed | Tile marked for deconstruction, recyclable tiles covered by tile ghosts |
 | Upgrades | The upgraded target entity | The original entity replaced by the upgrade |
-| Items | Requested items to deliver | Items already inside a deconstructed entity, storage-slot recycling requests, recycling products of environment entities (trees/fish/rocks...), on-ground items |
+| Items | Requested items to deliver, cliff explosives needed to demolish cliffs | Items already inside a deconstructed entity, storage-slot recycling requests, recycling products of environment entities (trees/fish/rocks...), on-ground items |
 
 > **About "Items"**: here, "items" refers to item requests produced when you perform a **ghost operation on an entity's storage slots** (set directly in remote view), which are served by **construction robots**. It does **not** refer to the item-logistics requests served by logistics robots.
 
@@ -63,6 +63,26 @@ It reads four kinds of requests and tracks them in two directions — **supply**
 - Targets belonging to **neutral/enemy forces** (trees, rocks, on-ground items, biter nests...) have no logistics network of their own; they are attributed by position to the player-force networks covering them. Entities of a player force only use their own force's construction areas.
 - Item requests on moving entities (e.g. tanks, spidertrons) are counted as well.
 - If a container entity (e.g. a chest) is marked for deconstruction, the items **already inside it** are classified under the "items" category as recycling.
+- **Tile ghost over a recyclable tile**: if an artificial tile (concrete, stone bricks, ...) already exists and a ghost of a different tile is placed on top, construction robots first remove the old tile while placing the new one, returning its item. That step is part of the "build tile" action, so the engine does **not** mark the old tile for deconstruction. The mod therefore records this **tile recycling** on the tile ghost itself and drops it when the ghost is built or cancelled. Foundation tiles (landfill, foundation, ice platform, artificial soil, ...) are the exception: the new tile is placed on top and only *hides* the old one, which is not removed, so it is not counted. If the same tile is also marked for deconstruction, the recycling is counted only once, on the deconstruction mark (which lives until the old tile is actually removed); if that deconstruction is cancelled while the tile remains, the tile ghost takes the count over.
+- **Demolishing cliffs**: a deconstruction-marked cliff yields no recyclable item, but demolishing it consumes **cliff explosives** (fetched by construction robots), so it is counted as **item supply**: `cliff explosives × number of cliffs marked`.
+
+## Performance notes
+
+**You normally do not need to worry about performance**: the reader only works when something in the world actually changes, so an idle world costs almost nothing. **Version 1.2.0 included a major performance improvement**, greatly reducing the ongoing cost in large bases, with many ghosts, and similar situations.
+
+### Possible performance issues
+
+- **Merging and splitting logistics networks**: when roboports are placed, removed, or destroyed, so that separate networks connect into one (merge) or one network breaks into several (split), all requests in the affected networks have to be reorganized, which may cause a one-time stutter spike; the larger the network, the more noticeable. This is currently the main source of cost. It only happens when the network topology changes and recovers once done, with no lasting impact on gameplay.
+
+### Operations you do not need to worry about
+
+- **Placing/pasting large blueprints or spawning many ghosts at once**: no ongoing performance cost from the number of ghosts.
+- **Marking a huge batch for deconstruction (a whole forest, rocks, ground items) or upgrade**: handled in one pass, with no continuing cost that grows item by item.
+- **Large surfaces with many trees/rocks/decorations**: the reader does not scan such unrelated objects, so cost is independent of surface size.
+- **Robots emptying chests/belts item by item**: no stutter from large item counts.
+- **Building many ghost readers**: most ghost readers can share the same computed result, so a large number of them does not significantly increase cost.
+- **Adding or removing roboports in a large logistics network**: as long as the network topology does not change (no merge or split), the cost is fixed and independent of network size.
+- **An idle world with nobody doing anything**: almost no cost.
 
 ---
 
@@ -114,6 +134,8 @@ A count item is a "count table classified by `change_type`"; readers filter by c
 | `upgrade` | Upgrade marking: target (supply) and original (recycling) | Upgrade supply / upgrade recycling |
 | `deconstruction-entity` | The deconstruction-marked entity itself (also the "is marked" test) | Entity recycling |
 | `deconstruction-tile` | Deconstruction-marked tile (represented by the deconstructible-tile-proxy) | Tile recycling |
+| `tile-ghost-recycle` | A recyclable tile covered by a tile ghost (the engine creates no deconstruction proxy for it; recorded on the tile ghost) | Tile recycling |
+| `deconstruction-cliff` | Deconstruction-marked cliff: cliff explosives needed to demolish it | Item supply |
 | `deconstruction-inventory` | Items inside entities **with internal storage**: robots carry them away one by one, polled by a content snapshot | Item recycling |
 | `deconstruction-instant` | Recycling products of **instantly removed** things (environment entities, on-ground items): counted once at marking | Item recycling |
 | `irp<reg_num>` | Requested (supply) and removal plan (recycling) of an IRP, stored on the target container | Item supply / item recycling |

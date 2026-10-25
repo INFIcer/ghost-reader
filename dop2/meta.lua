@@ -74,6 +74,11 @@ end
 ---@field lbox BoundingBox 平台的物流范围，仅在无人机平台上可访问
 ---@field count_entity_regions table<region,any> 计数实体所在归属地，仅在计数实体上可访问
 ---@field irp_snapshot snapshot|nil IRP 快照，仅在IRP上可访问
+---@field tile_ghost_key string|nil 地格拆除去重索引键，仅在"覆盖了可回收地格"的地格虚影上可访问
+---@field tile_proxy_key string|nil 地格拆除去重索引键，仅在地格拆除代理（deconstructible-tile-proxy）上可访问
+---@field decon_tilepos TilePosition|nil 地格拆除代理登记时的格点坐标（代理销毁时判断原地格是否还在）
+---@field decon_tile_name string|nil 地格拆除代理登记时的地格原型名（同上）
+---@field decon_tile_item string|nil 地格拆除代理登记时的地格回收物品名（取消拆除时还给虚影用）
 local meta = {}
 
 ---@param reg_num uint64 注册号

@@ -37,6 +37,36 @@ local function item_for_tile(name)
   end
 end
 
+-- 地格虚影覆盖到的地格 -> 铺新地格前会被拆掉并返还的物品名（无可回收物品则 nil）。
+-- "可回收"与拆除地格时的判定保持一致（都是 items_to_place_this）：
+-- 只有人工地格（混凝土/石砖等）能被拆回物品，自然地块（草/沙/水）没有可放置物品。
+-- 地基类地格（landfill/foundation/冰面平台/人工土壤等，原型 is_foundation=true）
+-- 例外：新地格铺上去时是把它"藏到下面"（成为 hidden tile），原地格并不会被拆掉，
+-- 所以不会返还物品，不能计入回收。
+---@param tile LuaTile
+---@return string|nil
+local function tile_covered_recycle_item(tile)
+  if not (tile and tile.valid) then return nil end
+  local p = prototypes.tile[tile.name]
+  if not p then return nil end
+  if p.is_foundation then return nil end
+  if p.items_to_place_this and #p.items_to_place_this > 0 then
+    return p.items_to_place_this[1].name
+  end
+end
+
+-- 悬崖拆除所需的悬崖炸药物品名（无则 nil）。
+-- 2.1 运行时字段 cliff_explosive_prototype 给的是物品名（字符串；非悬崖原型上为 nil），
+-- 用名字作计数键；仍兼容它返回 LuaItemPrototype 的情况（取 .name）。
+---@param prototype LuaEntityPrototype
+---@return string|nil
+local function cliff_explosive_item(prototype)
+  local explosive = prototype and prototype.cliff_explosive_prototype
+  if not explosive then return nil end
+  if type(explosive) == "string" then return explosive end
+  return explosive.name
+end
+
 
 -- 环境实体（树/鱼/岩石等）的期望挖掘产物：{ [item] = 数量 }。
 -- 没有 items_to_place_this，改从 mineable_properties.products 取，
@@ -257,6 +287,8 @@ end
 
 M.item_for_entity = item_for_entity
 M.item_for_tile = item_for_tile
+M.tile_covered_recycle_item = tile_covered_recycle_item
+M.cliff_explosive_item = cliff_explosive_item
 M.mineable_products = mineable_products
 M.is_instant_recycle = is_instant_recycle
 M.instant_recycle_items = instant_recycle_items

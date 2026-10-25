@@ -10,6 +10,57 @@ local paste = require("__ghost-reader__/dop2/paste")
 
 local M = {}
 
+--================================================================================================
+-- 地格拆除去重索引
+--================================================================================================
+-- 同一格可能同时存在「地格拆除标记（deconstructible-tile-proxy）」和「地格虚影」：
+-- 引擎会先执行拆除、再放置虚影地格，原地格只会被拆一次、返还一次物品。
+-- 两个计数项分别挂在两个实体上（拆除代理 COUNT_DECON_TILE、地格虚影
+-- COUNT_TILE_GHOST_RECYCLE），各自独立合并，会重复计一次。
+-- 这里按「表面 + 格点」建两张位置索引，让两者能 O(1) 互相定位：
+--   * 有拆除代理时，回收只由代理计（代理的存活期正好覆盖"原地格还没被拆"的阶段）；
+--   * 拆除被取消（原地格仍在）时，再把回收还给同格地格虚影；
+--   * 拆除完成（代理销毁）时什么都不做——原地格已经拆掉，虚影那边不能再计。
+-- 用索引而不是每次去 surface 上查实体：大范围拆地格/大蓝图铺地格时都是逐格事件，
+-- 逐格查询会带来与格数成正比的卡顿峰值。索引条目随实体销毁统一清理（见 on_destroyed）。
+---@type table<string,meta>
+local tile_decon_proxies = {}
+---@type table<string,meta>
+local tile_ghosts_with_covered = {}
+
+---格点位置键：表面号 + 格点坐标。
+---虚影与代理的位置都可能带 0.5 偏移，统一取 floor 后的格点，保证同一格得到同一个键。
+---@param surface LuaSurface
+---@param position MapPosition
+---@return string
+local function tile_key_of(surface, position)
+    return surface.index .. ":" .. math.floor(position.x) .. "," .. math.floor(position.y)
+end
+
+---把「覆盖地格」的回收计数还给同格地格虚影（仅用于拆除被取消、原地格仍保留的情况）。
+---必须同时满足：
+---  * 该格现在没有更新的拆除代理（否则回收仍应由新代理负责，见下面的索引身份校验）；
+---  * 同格有仍有效的地格虚影；
+---  * 原地格还在（瓦片名与代理登记时一致）——拆除已完成时瓦片名必然变了，
+---    这时不能把回收加回去（代理销毁的兜底判断也依赖这一点）。
+---@param key string 格点位置键
+---@param proxy_meta meta 被取消/销毁的地格拆除代理元信息
+local function restore_covered_recycle(key, proxy_meta)
+    --该格若已有仍有效的（更新的）拆除代理，回收仍由它负责，不能还给虚影
+    local other_proxy = tile_decon_proxies[key]
+    if other_proxy and other_proxy:vaild() then return end
+    local ghost_meta = tile_ghosts_with_covered[key]
+    if not (ghost_meta and ghost_meta:vaild() and proxy_meta.decon_tile_item) then return end
+    if not (proxy_meta.surface and proxy_meta.surface.valid and proxy_meta.decon_tilepos) then return end
+    local tile = proxy_meta.surface.get_tile(proxy_meta.decon_tilepos.x, proxy_meta.decon_tilepos.y)
+    if not (tile and tile.name == proxy_meta.decon_tile_name) then return end
+    ghost_meta:set_count_item(COUNT_TILE_GHOST_RECYCLE,
+        change_type.TILE_RECYCLE,
+        proxy_meta.decon_tile_item,
+        nil,
+        1)
+end
+
 ---读取器当前应归属的归属地：按配置的检索范围模式取所在表面或所在物流网络。
 ---不在任何物流网络内（或没有物流网络）时返回 nil，此时读取器无信号可读。
 ---@param entity LuaEntity
@@ -33,6 +84,34 @@ end
 local function on_tile_ghost_built(e)
     local m = meta.ensure_entity_meta(e)
     m:set_count_item('ghost', change_type.TILE_SUPPLY, item.item_for_tile(e.ghost_name), e.quality.name, 1)
+
+    --地格虚影压到一块可回收的人工地格上：机器人铺新地格前会先把原地格拆掉并返还物品，
+    --但这属于"铺地格"动作的一部分，引擎不会把原地格标记为拆除（不生成
+    --deconstructible-tile-proxy），所以只靠拆除标记会漏掉这份回收，必须在这里补记。
+    --计数挂在虚影自己身上：虚影建成/取消时随实体销毁由 meta:on_destroyed 统一撤掉。
+    --铺的本来就是同一种地格时没有拆除动作，不计；地基类地格（landfill/foundation 等）
+    --只是被新地格藏到下面、不会被拆掉，tile_covered_recycle_item 里会排除。
+    local position = e.position
+    local covered = e.surface.get_tile(math.floor(position.x), math.floor(position.y))
+    if covered and covered.name ~= e.ghost_name then
+        local recovered = item.tile_covered_recycle_item(covered)
+        if recovered then
+            local key = tile_key_of(e.surface, position)
+            --登记虚影（即使当前有拆除标记也要登记：拆除被取消后要把回收计数还回来）
+            tile_ghosts_with_covered[key] = m
+            m.tile_ghost_key = key
+            --同一格已有拆除标记：回收由代理计（见文件头部说明），虚影先不计数。
+            --代理可能刚被拆掉但销毁事件还没处理（元信息已失效），这种不算数。
+            local proxy_meta = tile_decon_proxies[key]
+            if proxy_meta and not proxy_meta:vaild() then
+                tile_decon_proxies[key] = nil
+                proxy_meta = nil
+            end
+            if not proxy_meta then
+                m:set_count_item(COUNT_TILE_GHOST_RECYCLE, change_type.TILE_RECYCLE, recovered, nil, 1)
+            end
+        end
+    end
 end
 
 ---@param event EventData.on_built_entity
@@ -120,7 +199,33 @@ local function apply_deconstruction(entity)
             tile and item.item_for_tile(tile.name),
             nil,
             1)
+        --与同格地格虚影去重：同一格只算一次回收，且由代理来算——代理存活到原地格
+        --被拆掉为止，虚影存活到新地格铺好为止，原格被拆后虚影不该继续报回收。
+        --（拆除被取消时再把计数还给虚影，见 on_cancel_deconstruction /
+        -- on_destroyed 里的兜底判断。）
+        local key = tile_key_of(entity.surface, position)
+        tile_decon_proxies[key] = m
+        m.tile_proxy_key = key
+        --记下原地格信息：代理销毁时用它判断原地格是否还在（区分"拆除完成"与"拆除取消"）
+        m.decon_tilepos = { x = math.floor(position.x), y = math.floor(position.y) }
+        m.decon_tile_name = tile and tile.name
+        m.decon_tile_item = tile and item.item_for_tile(tile.name)
+        local ghost_meta = tile_ghosts_with_covered[key]
+        if ghost_meta then
+            ghost_meta:remove_count_item(COUNT_TILE_GHOST_RECYCLE)
+        end
         return
+    end
+
+    --悬崖：本身没有可放置物品（不会因拆除返还实体），也没有可挖掘产物；
+    --但拆除悬崖要消耗悬崖炸药，由建设机器人从物流网络取用——对读取器来说
+    --这就是一份待供给的物品，每座悬崖 1 个。
+    --物品名取原型上的 cliff_explosive_prototype（替换该物品的 mod 也能取到）。
+    if entity.type == "cliff" then
+        local explosive = item.cliff_explosive_item(entity.prototype)
+        if explosive and prototypes.item[explosive] then
+            m:set_count_item(COUNT_DECON_CLIFF, change_type.ITEM_SUPPLY, explosive, nil, 1)
+        end
     end
 
     --被拆实体本身记为实体类别回收（这个计数项同时充当"已标记拆除"的判据）
@@ -157,11 +262,15 @@ end
 
 ---@param event EventData.on_cancelled_deconstruction
 local function on_cancel_deconstruction(event)
+    --实体可能已被销毁（个别事件时序下销毁事件会先到）：此时计数由
+    --on_object_destroyed 统一清理，不必也不能再碰这个实体。
+    if not (event.entity and event.entity.valid) then return end
     local m = meta.ensure_entity_meta(event.entity)
     m:remove_count_item(COUNT_DECON_ENTITY)
     m:remove_count_item(COUNT_DECON_INVENTORY)
     m:remove_count_item(COUNT_DECON_INSTANT)
     m:remove_count_item(COUNT_DECON_TILE)
+    m:remove_count_item(COUNT_DECON_CLIFF)
     if m.movable > 0 then
         m:unregister_movable()
     end
@@ -169,6 +278,16 @@ local function on_cancel_deconstruction(event)
     if m.inventory_snapshot then
         snapshot.remove_snapshot(m.inventory_snapshot)
         m.inventory_snapshot = nil
+    end
+    --地格拆除取消：原地格还在，同格地格虚影铺新地格时仍要先拆掉它，
+    --把之前为去重而撤掉的覆盖回收计数还给虚影（拆除完成时则不需要，见 apply_deconstruction）。
+    --注意：这里不能假定引擎一定会对地格代理派发本事件，on_destroyed 里还有按
+    --"原地格是否还在"判断的兜底；两处都做也不会重复（set 同一计数项是幂等的）。
+    if event.entity.type == "deconstructible-tile-proxy" then
+        local key = tile_key_of(event.entity.surface, event.entity.position)
+        if tile_decon_proxies[key] == m then tile_decon_proxies[key] = nil end
+        m.tile_proxy_key = nil
+        restore_covered_recycle(key, m)
     end
 end
 
@@ -272,6 +391,9 @@ function M.rebuild()
     region.reset()
     snapshot.reset()
     changes.clear()
+    --地格拆除去重的位置索引：会随下面的全量枚举重新建立
+    tile_decon_proxies = {}
+    tile_ghosts_with_covered = {}
 
     --2) 表面归属地（顺带完成销毁注册，供 on_object_destroyed 回收）
     for _, surface in pairs(game.surfaces) do
@@ -509,6 +631,25 @@ end
 ---@param event EventData.on_object_destroyed
 local function on_destroyed(event)
     local reg_num = event.registration_number
+    --清理地格拆除去重的位置索引（代理/虚影销毁后不能留失效条目）。
+    --删除前做身份校验：同一格可能已经登记了新的虚影/代理，旧实体的销毁事件
+    --不能把新条目误删（否则新虚影在后续标记拆除时会重复计数）。
+    local m = meta.get_meta(reg_num)
+    if m then
+        if m.tile_proxy_key then
+            local key = m.tile_proxy_key
+            if tile_decon_proxies[key] == m then tile_decon_proxies[key] = nil end
+            --兜底去重（不依赖 on_cancelled_deconstruction 是否对地格代理派发）：
+            --代理销毁有两种原因——拆除完成（原地格已被拆走/换成新地格）或拆除被取消
+            --（原地格还在）。restore_covered_recycle 内部会按"原地格名是否仍是登记时
+            --那个"判断：还在 = 取消，把回收还给同格地格虚影；不在 = 完成，不还。
+            restore_covered_recycle(key, m)
+        end
+        if m.tile_ghost_key then
+            local key = m.tile_ghost_key
+            if tile_ghosts_with_covered[key] == m then tile_ghosts_with_covered[key] = nil end
+        end
+    end
     region.remove_region(reg_num)
     meta.remove_meta(reg_num)
 end
