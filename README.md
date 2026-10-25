@@ -214,3 +214,12 @@ ghost-reader/
 ├── locale/en|zh-CN/     # 本地化
 └── thumbnail.png
 ```
+
+---
+
+# 鸣谢
+
+本 mod 的开发受到以下两个 mod 的启发：
+
+- [Ghost Combinator](https://mods.factorio.com/mod/ghost-combinator) by gpalumbo
+- [PKE Meter](https://mods.factorio.com/mod/pke-meter) by The_LORD_thy_GOD

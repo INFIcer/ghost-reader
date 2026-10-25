@@ -214,3 +214,12 @@ ghost-reader/
 ├── locale/en|zh-CN/     # Localization
 └── thumbnail.png
 ```
+
+---
+
+# Acknowledgements
+
+The development of this mod was inspired by the following two mods:
+
+- [Ghost Combinator](https://mods.factorio.com/mod/ghost-combinator) by gpalumbo
+- [PKE Meter](https://mods.factorio.com/mod/pke-meter) by The_LORD_thy_GOD
