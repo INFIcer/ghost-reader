@@ -73,6 +73,7 @@ It reads four kinds of requests and tracks them in two directions — **supply**
 ### Possible performance issues
 
 - **Merging and splitting logistics networks**: when roboports are placed, removed, or destroyed, so that separate networks connect into one (merge) or one network breaks into several (split), all requests in the affected networks have to be reorganized, which may cause a one-time stutter spike; the larger the network, the more noticeable. This is currently the main source of cost. It only happens when the network topology changes and recovers once done, with no lasting impact on gameplay.
+- **A large number of signals of different types with frequent changes**: This situation is very rare, because in most cases frequent signal changes occur while a UAV is executing a mission, and the change frequency decreases as the mission gradually completes. If this situation persists over a long period, it will cause slight but continuous overhead.
 
 ### Operations you do not need to worry about
 
