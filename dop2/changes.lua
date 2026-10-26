@@ -4,19 +4,17 @@ local M = {}
 ---@field dirty_readers_region table<meta,any>
 ---@field dirty_readers_output table<meta,any>
 ---@field dirty_count_entities_region  table<meta,any>
----@field dirty_count_entities_output  table<meta,any>
----@field dirty_regions_output table<region,any>
 local changes = {}
 
----comment
+---本帧待处理的变更集合。
+---计数本身不再进这里：计数项一改就当场把增量写给归属地（region:add_count），
+---不再靠"标脏归属地 + 帧末整份重算"，所以这里只剩三类"待解析/待重写"的工作。
 ---@return changes
 function changes:new()
     local obj = {
         dirty_readers_region = {},
         dirty_readers_output = {},
         dirty_count_entities_region = {},
-        dirty_count_entities_output = {},
-        dirty_regions_output = {}
     }
     return obj
 end
@@ -36,22 +34,10 @@ function M.dirty_reader_output(reader)
     current_changes.dirty_readers_output[reader] = true
 end
 
----标记计数实体计数脏（由计数变化引发：需要把计数污染到所在归属地）
----@param count_entity meta
-function M.dirty_count_entitiy_output(count_entity)
-    current_changes.dirty_count_entities_output[count_entity] = true
-end
-
 ---标记计数实体归属地脏（由实体移动引发：需要重新解析所在归属地）
 ---@param count_entity meta
 function M.dirty_count_entitiy_region(count_entity)
     current_changes.dirty_count_entities_region[count_entity] = true
-end
-
----标记归属地计数脏
----@param region region
-function M.dirty_region_output(region)
-    current_changes.dirty_regions_output[region] = true
 end
 
 ---清除所有脏标记

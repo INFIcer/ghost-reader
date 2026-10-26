@@ -124,10 +124,11 @@ local function update_irp(irp, previous)
         local target = irp.proxy_target --请求容器实体
         if irp_meta and target and target.valid then
             local m = meta.ensure_entity_meta(target)
-            local ci = m:get_count_item(COUNT_IRP_PREFIX .. tostring(irp_meta.reg_num))
-            ci:replace(change_type.ITEM_SUPPLY, requests)
-            ci:replace(change_type.ITEM_RECYCLE, removals)
-            changes.dirty_count_entitiy_output(m)
+            --走 meta 的替换接口：它会算出净变化量并增量通知目标容器所在的归属地。
+            --不能拿 get_count_item 返回的对象直接改，否则归属地总和不会跟着变。
+            local name = COUNT_IRP_PREFIX .. tostring(irp_meta.reg_num)
+            m:replace_count_item(name, change_type.ITEM_SUPPLY, requests)
+            m:replace_count_item(name, change_type.ITEM_RECYCLE, removals)
         end
     end
     return fingerprint

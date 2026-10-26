@@ -77,34 +77,52 @@ function region:name()
     end
 end
 
----更新计数：把所有计数实体的计数项合并成一个计数项
-function region:update_count()
-    ---@type count_item
-    local count = count_item.create()
-    for meta, _ in pairs(self.count_entities) do
-        local count_items = meta.count_items
-        if count_items then
-            --实体本身已被标记拆除时，它在目标容器上留下的 IRP 计数项要跳过
-            --（拆除后请求已作废，留着会与实体回收重复计）
-            local deconstruction_mark = count_items[COUNT_DECON_INVENTORY]
-            for name, item_count in pairs(count_items) do
-                if deconstruction_mark and has_prefix(name, COUNT_IRP_PREFIX) then
-                    --有销毁标志时跳过irp统计
-                else
-                    for kind, item_counts in pairs(item_count) do
-                        for item, quality_counts in pairs(item_counts) do
-                            for quality, n in pairs(quality_counts) do
-                                count:add(kind, item, quality, n)
-                            end
-                        end
-                    end
-                end
-            end
-        end
+---把一次计数增量写进归属地计数。
+---不通知读取器、也不作废输出缓存：成员整份增减时由调用方批量处理一次即可。
+---归属地计数是增量维护的，所以 count 里不允许留下 0 值项：否则过滤时会把
+---数量为 0 的信号也写进电路（旧实现整份重算，天然不会留下 0）。
+---@param kind change_type
+---@param item string 物品名
+---@param quality string 品质名
+---@param count int 增量（正负均可）
+function region:apply_count(kind, item, quality, count)
+    if count == 0 then return end
+    local total = self.count
+    if not total then
+        total = count_item.create()
+        self.count = total
     end
-    self.count = count
-    --计数变了，之前按过滤器组合缓存的读取结果全部作废
+    local item_counts = total:counter_of(kind)
+    local quality_counts = item_counts:row(item)
+    local value = (quality_counts[quality] or 0) + count
+    if value == 0 then
+        quality_counts[quality] = nil
+        --整行都空了就连物品行一起摘掉，让计数表只保留真实存在的项
+        if next(quality_counts) == nil then item_counts[item] = nil end
+    else
+        quality_counts[quality] = value
+    end
+end
+
+---归属地计数变了：作废按过滤器组合缓存的读取结果，并让归属地内所有读取器重写输出
+function region:invalidate_outputs()
     self.outputs = nil
+    for reader, _ in pairs(self.readers) do
+        --读取器可能已经失效（标脏与处理之间被拆掉）：这里照样登记，
+        --由帧末的读取器计数清理统一摘除元信息（见 events.on_tick）。
+        changes.dirty_reader_output(reader)
+    end
+end
+
+---把一次计数变化增量写入归属地，并通知归属地内的读取器
+---@param kind change_type
+---@param item string 物品名
+---@param quality string 品质名
+---@param count int 增量（正负均可）
+function region:add_count(kind, item, quality, count)
+    if count == 0 then return end
+    self:apply_count(kind, item, quality, count)
+    self:invalidate_outputs()
 end
 
 ---添加读取器元数据
@@ -119,18 +137,24 @@ function region:remove_reader(reader)
     self.readers[reader] = nil
 end
 
----添加计数实体元数据
+---添加计数实体元数据：把这个实体的全部有效计数计入本归属地
 ---@param entity meta
 function region:add_count_entity(entity)
+    --幂等：同一实体重复登记不能重复计入
+    if self.count_entities[entity] then return end
     self.count_entities[entity] = true
-    changes.dirty_region_output(self)
+    entity:contribute_counts(self, 1)
+    self:invalidate_outputs()
 end
 
----移除计数实体元数据
+---移除计数实体元数据：把这个实体的全部有效计数移出本归属地
 ---@param entity meta
 function region:remove_count_entity(entity)
+    --幂等：不在表里的实体不能重复扣减
+    if not self.count_entities[entity] then return end
     self.count_entities[entity] = nil
-    changes.dirty_region_output(self)
+    entity:contribute_counts(self, -1)
+    self:invalidate_outputs()
 end
 
 function region:vaild()

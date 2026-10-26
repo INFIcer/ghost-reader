@@ -97,6 +97,9 @@ function meta:new(reg_num, entity)
 end
 
 ---增添一个计数项
+---注意：返回的对象**不要直接改**。归属地计数靠计数项变化时的增量通知维护
+---（见下面的 propagate 小节），绕过本文件的方法直接改计数表会让归属地总和永久偏差。
+---只有"整体重算/替换"这类一次算清的场景才用 replace_count_item。
 ---@param name string 计数项的id
 ---@return count_item 计数项
 function meta:get_count_item(name)
@@ -109,7 +112,95 @@ function meta:get_count_item(name)
     return obj
 end
 
----设置一个计数项
+--================================================================================================
+-- 计数增量传播
+--================================================================================================
+--归属地计数是增量维护的：不再"标脏归属地、帧末整份重算"，而是任何计数项一变就当场把
+--净变化量加到该计数实体所在的所有归属地上（region:add_count）。
+--正确性完全取决于这里：重复通知会让总和偏大、遗漏通知会让总和永久偏小。
+--所以所有计数项修改都必须走下面的方法（get_count_item 拿到的对象不能直接改）。
+--
+--两个容易出错的点，这里集中处理：
+--  1. 同一计数实体可能同时属于多个归属地（所在表面 + 所在物流网络），变化要逐个通知；
+--  2. IRP 计数项记在目标容器上，容器一旦被标记拆除（出现 deconstruction-inventory
+--     计数项），这些请求就不再算数（拆除后请求已作废，留着会与实体回收重复计）。
+--     该可见性是由"另一个计数项存不存在"决定的，所以增删 deconstruction-inventory
+--     时必须把它遮住/放出全部 IRP 计数。
+
+---计数项当前是否被 IRP 隐藏规则挡在归属地计数之外
+---@param self meta
+---@param name string 计数项名
+---@return boolean
+local function irp_hidden(self, name)
+    local items = self.count_items
+    return items ~= nil and items[COUNT_DECON_INVENTORY] ~= nil and has_prefix(name, COUNT_IRP_PREFIX)
+end
+
+---该实体是否已有某个计数项
+---@param name string 计数项名
+---@return boolean
+function meta:has_count_item(name)
+    return self.count_items ~= nil and self.count_items[name] ~= nil
+end
+
+---把一个计数增量通知给实体当前所在的所有归属地
+---@param kind change_type
+---@param item string 物品名
+---@param quality string 品质名
+---@param delta int 增量（正负均可）
+function meta:notify_region_delta(kind, item, quality, delta)
+    if delta == 0 then return end
+    --set_count_item 的品质参数可以是 nil（缺省 normal），而归属地计数的键必须是字符串，
+    --否则用 nil 当表键会直接报 "table index is nil"。这里统一兜底成名字。
+    quality = ensure_quality(quality)
+    local regions = self.count_entity_regions
+    if not regions then return end
+    for target_region in pairs(regions) do
+        target_region:add_count(kind, item, quality, delta)
+    end
+end
+
+---IRP 计数项的可见性翻转：hide=true 表示归属地计数里要扣掉现存 IRP 计数，
+---hide=false 表示重新加回（deconstruction-inventory 被删掉时）。
+---@param hide boolean
+function meta:notify_irp_visibility(hide)
+    local items = self.count_items
+    if not items then return end
+    for name, count_item_of in pairs(items) do
+        if has_prefix(name, COUNT_IRP_PREFIX) then
+            for kind, item_counts in pairs(count_item_of) do
+                for item, quality_counts in pairs(item_counts) do
+                    for quality, n in pairs(quality_counts) do
+                        self:notify_region_delta(kind, item, quality, hide and -n or n)
+                    end
+                end
+            end
+        end
+    end
+end
+
+---把实体的全部有效计数整份计入/移出某个归属地（成员变更时用）。
+---有效 = 所有计数项，但 IRP 计数项在 deconstruction-inventory 存在时不算。
+---@param target_region region
+---@param sign int 1 = 计入，-1 = 移出
+function meta:contribute_counts(target_region, sign)
+    local items = self.count_items
+    if not items then return end
+    local hidden_irp = items[COUNT_DECON_INVENTORY] ~= nil
+    for name, count_item_of in pairs(items) do
+        if not (hidden_irp and has_prefix(name, COUNT_IRP_PREFIX)) then
+            for kind, item_counts in pairs(count_item_of) do
+                for item, quality_counts in pairs(item_counts) do
+                    for quality, n in pairs(quality_counts) do
+                        target_region:apply_count(kind, item, quality, sign * n)
+                    end
+                end
+            end
+        end
+    end
+end
+
+---设置一个计数项（覆盖）。变化量 = 新值 - 旧值，按变化量增量通知归属地。
 ---@param name string 计数项的id
 ---@param kind change_type
 ---@param item? string 物品名（计数表的键是名字）
@@ -117,32 +208,89 @@ end
 ---@param count int
 function meta:set_count_item(name, kind, item, quality, count)
     if not item then return end
+    --创建 deconstruction-inventory 会把已有的 IRP 计数项从归属地里遮掉
+    local hides_irp = name == COUNT_DECON_INVENTORY and not self:has_count_item(name)
     --品质兜底在 count_item 内部完成
-    self:get_count_item(name):set(kind, item, quality, count)
-    self:mark_dirty()
+    local count_item_of = self:get_count_item(name)
+    local old = count_item_of:read(kind, item, quality)
+    local delta = count - old
+    count_item_of:set(kind, item, quality, count)
+    --IRP 计数项被遮住时它的变化不属于归属地总和，不通知
+    if not irp_hidden(self, name) then
+        self:notify_region_delta(kind, item, quality, delta)
+    end
+    if hides_irp then self:notify_irp_visibility(true) end
 end
 
 ---用整张计数器覆盖某个计数项的某个类别（替换而非累加）。
 ---用于"一次算清一整份计数"的场景：快照重算内容物、瞬间拆除类的回收物。
+---先扣掉旧内容的计数，再加回新内容，归属地总和始终等于真实值。
 ---@param name string 计数项的id
 ---@param kind change_type
----@param c counter
+---@param c counter|nil 为 nil 表示清空该类别
 function meta:replace_count_item(name, kind, c)
-    self:get_count_item(name):replace(kind, c)
-    self:mark_dirty()
+    --创建 deconstruction-inventory 会把已有的 IRP 计数项从归属地里遮掉
+    local hides_irp = name == COUNT_DECON_INVENTORY and not self:has_count_item(name)
+    local count_item_of = self:get_count_item(name)
+    if not irp_hidden(self, name) then
+        local old = count_item_of[kind]
+        if old then
+            for item, quality_counts in pairs(old) do
+                for quality, n in pairs(quality_counts) do
+                    self:notify_region_delta(kind, item, quality, -n)
+                end
+            end
+        end
+        if c then
+            for item, quality_counts in pairs(c) do
+                for quality, n in pairs(quality_counts) do
+                    self:notify_region_delta(kind, item, quality, n)
+                end
+            end
+        end
+    end
+    count_item_of:replace(kind, c)
+    if hides_irp then self:notify_irp_visibility(true) end
 end
 
----删除一个计数项
+---删除一个计数项：把它当前的全部计数从归属地扣掉。
+---删除 deconstruction-inventory 时，原先被它遮住的 IRP 计数项要重新加回归属地。
 ---@param name string 计数项的id
 function meta:remove_count_item(name)
-    if self.count_items then self.count_items[name] = nil end
-    self:mark_dirty()
+    local items = self.count_items
+    if not (items and items[name]) then return end
+    local removes_decon_mark = (name == COUNT_DECON_INVENTORY)
+    if not irp_hidden(self, name) then
+        for kind, item_counts in pairs(items[name]) do
+            for item, quality_counts in pairs(item_counts) do
+                for quality, n in pairs(quality_counts) do
+                    self:notify_region_delta(kind, item, quality, -n)
+                end
+            end
+        end
+    end
+    items[name] = nil
+    if removes_decon_mark then self:notify_irp_visibility(false) end
 end
 
----删除所有计数项
+---删除所有计数项。
+---净效果是归属地贡献归零（IRP 计数项本来就被遮住时也不放出，因为它们同样被删掉了）。
 function meta:clear_count_item()
+    local items = self.count_items
+    if not items then return end
+    local hidden_irp = items[COUNT_DECON_INVENTORY] ~= nil
+    for name, count_item_of in pairs(items) do
+        if not (hidden_irp and has_prefix(name, COUNT_IRP_PREFIX)) then
+            for kind, item_counts in pairs(count_item_of) do
+                for item, quality_counts in pairs(item_counts) do
+                    for quality, n in pairs(quality_counts) do
+                        self:notify_region_delta(kind, item, quality, -n)
+                    end
+                end
+            end
+        end
+    end
     self.count_items = nil
-    self:mark_dirty()
 end
 
 ---注册可移动
@@ -161,11 +309,6 @@ function meta:unregister_movable()
     end
 end
 
----标记脏数据
-function meta:mark_dirty()
-    changes.dirty_count_entitiy_output(self)
-end
-
 ---把某个归属地的计数按配置过滤合并成输出计数表
 ---按配置的筛选模式/数量模式过滤合并归属地计数，NET 模式下回收计为负数。
 ---GUI 信号表与电路输出共用本函数，避免两处各写一遍合并逻辑。
@@ -173,7 +316,7 @@ end
 ---结果按「过滤器组合」缓存在归属地上：过滤只取决于（归属地计数, 筛选, 数量, 品质），
 ---配置相同的读取器结果必然一样，所以同一归属地下的同配置读取器共用一份结果——
 ---大量读取器时这是主要开销（每次计数变化都要为每个读取器重新过滤一遍归属地计数）。
----归属地计数一变（region:update_count）缓存即作废；读取器改配置只是换了个键。
+---归属地计数一变（region:add_count 内部 invalidate_outputs）缓存即作废；读取器改配置只是换了个键。
 ---返回的计数表是**共享的只读结果**，调用方不得修改。
 ---@param reader_region region|nil
 ---@param unit uint64 读取器单位号（配置按单位号存放）
@@ -320,27 +463,34 @@ function meta:reader_set_region(region)
     end
 end
 
----为计数实体添加归属地
+---为计数实体添加归属地。
+---加入时把实体当前的全部有效计数整份计入归属地，之后的计数变化再按增量通知。
 ---@param region region
 function meta:add_to_region(region)
     if not self.count_entity_regions then self.count_entity_regions = {} end
+    --幂等：重复加入不能重复计入
+    if self.count_entity_regions[region] then return end
     self.count_entity_regions[region] = true
     region:add_count_entity(self)
 end
 
----为计数实体移除归属地
+---为计数实体移除归属地。
+---移出时把实体当前的全部有效计数从归属地扣掉，保证归属地总和仍然准确。
 ---@param region region
 function meta:remove_from_region(region)
+    if not (self.count_entity_regions and self.count_entity_regions[region]) then return end
     self.count_entity_regions[region] = nil
     region:remove_count_entity(self)
 end
 
 ---为计数实体移除所有归属地
 function meta:clear_regions()
-    --count_entity_regions 是集合（归属地 -> true），须用 pairs 遍历
+    --count_entity_regions 是集合（归属地 -> true），须用 pairs 遍历。
+    --这里直接调 region:remove_count_entity（幂等且会扣掉该实体的计数），
+    --不在遍历中改动集合本身，遍历结束后整表丢弃。
     if self.count_entity_regions then
-        for region, _ in pairs(self.count_entity_regions) do
-            region:remove_count_entity(self)
+        for target_region, _ in pairs(self.count_entity_regions) do
+            target_region:remove_count_entity(self)
         end
     end
     self.count_entity_regions = nil
@@ -348,9 +498,9 @@ end
 
 function meta:on_destroyed()
     --IRP清理：它在目标容器上留下的计数项与轮询快照都要撤掉
+    --（remove_count_item 会把它从目标容器所在归属地的计数里同步扣掉）
     if self.proxy_target then
         self.proxy_target:remove_count_item(COUNT_IRP_PREFIX .. tostring(self.reg_num))
-        changes.dirty_count_entitiy_output(self.proxy_target)
         if self.proxy_target.movable > 0 then
             self.proxy_target:unregister_movable()
         end
@@ -359,7 +509,8 @@ function meta:on_destroyed()
         get_snapshot().remove_snapshot(self.irp_snapshot)
     end
 
-    --计数实体清理
+    --计数实体清理：先扣掉全部计数项、再摘除归属地，两步净效果是归属地贡献归零。
+    --顺序不能反：clear_count_item 依赖 count_entity_regions 才能把计数扣到归属地上。
     self:clear_count_item()
     self:clear_regions()
     if self.tilepos_snapshot then

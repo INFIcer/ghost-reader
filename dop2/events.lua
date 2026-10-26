@@ -530,10 +530,10 @@ local function on_tick()
         M.rebuild()
     end
 
-    --快照触发计时实体归属地脏、计时实体计数脏（库存变化引发）
+    --快照轮询：内容物/IRP 变化已由计数项修改方法增量写进归属地；位置变化只标归属地脏
     snapshot.on_tick()
 
-    --清理计时实体归属地(由实体移动引发)
+    --清理计数实体归属地(由实体移动引发)
     for ce, _ in pairs(changes.current.dirty_count_entities_region) do
         ---@type meta
         local e = ce
@@ -567,32 +567,10 @@ local function on_tick()
         end
     end
 
-    --计数从计时实体污染到归属地(计数脏由各类事件、库存变化引发)
-    for ce, _ in pairs(changes.current.dirty_count_entities_output) do
-        --尚未落到任何归属地的计数实体没有可污染的归属地
-        if ce.count_entity_regions then
-            for r, _ in pairs(ce.count_entity_regions) do
-                changes.dirty_region_output(r)
-            end
-        end
-    end
-
-    --清理归属地计数
-    for region, _ in pairs(changes.current.dirty_regions_output) do
-        if region:vaild() then
-            region:update_count()
-            --读取器可能已经失效（标脏与处理之间被拆掉，归属地表里还留着它）：
-            --就地摘掉并丢弃元信息，免得下一帧再去碰失效实体
-            for reader, _ in pairs(region.readers) do
-                if reader:vaild() then
-                    changes.dirty_reader_output(reader)
-                else
-                    region:remove_reader(reader)
-                    meta.remove_meta(reader.reg_num)
-                end
-            end
-        end
-    end
+    --计数不再在这里汇总：计数项一变就已把增量写给归属地（meta 的计数修改方法
+    --→ region:add_count），归属地表里始终是当前总和，无需"标脏 + 整份重算"。
+    --归属地计数变化时 region:invalidate_outputs 会作废读取结果缓存并标脏读取器，
+    --所以下面的读取器计数清理会把这些变化写进电路/面板。
 
     --清理读取器归属地
     for reader, _ in pairs(changes.current.dirty_readers_region) do
@@ -620,10 +598,8 @@ local function on_tick()
             meta.remove_meta(r.reg_num)
         end
     end
-
     --刷新已打开的面板（状态行与信号表随配置/归属地变化）
     gui.refresh_open()
-
     changes.clear()
 end
 
