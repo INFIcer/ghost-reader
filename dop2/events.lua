@@ -463,6 +463,10 @@ function M.rebuild()
             end
         end
     end
+
+    --9) 面板是存档的一部分、会随读档保留，而 GUI 模块的"打开面板数"随 control.lua 重跑归零，
+    --   所以重建末尾按实际面板数重算一次（否则读档后开着的面板永远不会再被按需刷新）。
+    gui.resync_open_panels()
 end
 
 ---@param _ EventData.on_configuration_changed
@@ -523,6 +527,16 @@ local function logistic_networks_at(entity)
     return found
 end
 
+---把读取器所在位置的面板登记为待刷新。
+---位置用登记元信息时保存的 panel_position：实体可能已经失效，失效后读不到 position。
+---没有面板打开时 gui.mark_dirty 直接返回，不会拼位置键。
+---@param m meta
+local function mark_panel_dirty(m)
+    if m.panel_position then
+        gui.mark_dirty(m.panel_surface_index, m.panel_position)
+    end
+end
+
 local function on_tick()
     --0) 读档后的首帧：注册表已随 control.lua 重跑清空，先做一次全量重建
     if needs_rebuild then
@@ -572,6 +586,9 @@ local function on_tick()
     --归属地计数变化时 region:invalidate_outputs 会作废读取结果缓存并标脏读取器，
     --所以下面的读取器计数清理会把这些变化写进电路/面板。
 
+    --清洗阶段只登记、不改 GUI；先取一次"是否有面板打开"，没有就全程不做 GUI 工作。
+    local panels_open = gui.has_open_panels()
+
     --清理读取器归属地
     for reader, _ in pairs(changes.current.dirty_readers_region) do
         ---@type meta
@@ -580,6 +597,8 @@ local function on_tick()
             r:reader_set_region(reader_region_of(r.entity))
             changes.dirty_reader_output(r)
         else
+            --读取器已失效：面板下帧刷新时按位置找不到读取器就会关闭
+            if panels_open then mark_panel_dirty(r) end
             meta.remove_meta(r.reg_num)
         end
     end
@@ -589,6 +608,9 @@ local function on_tick()
     for reader, _ in pairs(changes.current.dirty_readers_output) do
         ---@type meta
         local r = reader
+        --面板刷新是按需的：只有这个读取器真的发生变动（计数/归属地/配置）才登记它的位置，
+        --帧末统一刷新；没打开面板时连位置键都不拼（见 gui.mark_dirty）。
+        if panels_open then mark_panel_dirty(r) end
         --读取器可能已经失效：标脏之后、处理之前被拆掉（平台与读取器同一帧被拆、
         --或者上一帧中途出错把脏标记留到了本帧）。失效就跳过——它已经没有输出了。
         if r:vaild() then
@@ -598,8 +620,17 @@ local function on_tick()
             meta.remove_meta(r.reg_num)
         end
     end
-    --刷新已打开的面板（状态行与信号表随配置/归属地变化）
-    gui.refresh_open()
+    --只刷新面板的配置变化（读取器虚影改配置：没有电路输出可重写，但可能开着面板）
+    if panels_open then
+        for reader, _ in pairs(changes.current.dirty_readers_panel) do
+            ---@type meta
+            mark_panel_dirty(reader)
+        end
+    end
+    --只刷新"确实开着 + 对应读取器本帧发生过变动"的面板；没有登记则立即返回。
+    --dirty_regions_count 是本帧计数变化的归属地：读取器虚影不在 region.readers 里，
+    --它的面板靠"面板当前所在归属地"匹配这个集合来刷新（真实读取器面板一般已按位置登记）。
+    if panels_open then gui.refresh_dirty(changes.current.dirty_regions_count) end
     changes.clear()
 end
 
@@ -612,6 +643,12 @@ local function on_destroyed(event)
     --不能把新条目误删（否则新虚影在后续标记拆除时会重复计数）。
     local m = meta.get_meta(reg_num)
     if m then
+        --读取器（含读取器虚影）被销毁：登记它的面板位置，下次刷新时同位置若已经换成
+        --新读取器（虚影建成真实读取器）就切过去，没有就关闭面板。
+        --位置用登记元信息时保存的 panel_position——实体此刻已经失效、读不到 position。
+        if m.panel_position then
+            gui.mark_dirty(m.panel_surface_index, m.panel_position)
+        end
         if m.tile_proxy_key then
             local key = m.tile_proxy_key
             if tile_decon_proxies[key] == m then tile_decon_proxies[key] = nil end

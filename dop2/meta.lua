@@ -74,6 +74,8 @@ end
 ---@field lbox BoundingBox 平台的物流范围，仅在无人机平台上可访问
 ---@field count_entity_regions table<region,any> 计数实体所在归属地，仅在计数实体上可访问
 ---@field irp_snapshot snapshot|nil IRP 快照，仅在IRP上可访问
+---@field panel_surface_index int|nil 读取器（真实实体/虚影）面板所在的表面号，仅在读取器与读取器虚影上可访问
+---@field panel_position MapPosition|nil 读取器（真实实体/虚影）面板所在的位置，仅在读取器与读取器虚影上可访问
 ---@field tile_ghost_key string|nil 地格拆除去重索引键，仅在"覆盖了可回收地格"的地格虚影上可访问
 ---@field tile_proxy_key string|nil 地格拆除去重索引键，仅在地格拆除代理（deconstructible-tile-proxy）上可访问
 ---@field decon_tilepos TilePosition|nil 地格拆除代理登记时的格点坐标（代理销毁时判断原地格是否还在）
@@ -496,6 +498,20 @@ function meta:clear_regions()
     self.count_entity_regions = nil
 end
 
+---把区域内读取器虚影的面板登记为待刷新。
+---读取器虚影不是 region.readers 的成员，平台增删导致它预览到的物流网络变化时拿不到
+---归属地变更通知，只能在这里显式登记（只影响已打开的面板，见 gui.mark_dirty 的门控）。
+---@param surface LuaSurface
+---@param area BoundingBox
+local function dirty_ghost_reader_panels(surface, area)
+    --用引擎的 ghost_name 过滤，避免把区域里成千上万个其它虚影全取出来
+    for _, ghost in ipairs(surface.find_entities_filtered({ area = area, ghost_name = READER })) do
+        if ghost.valid then
+            changes.dirty_reader_panel(M.ensure_entity_meta(ghost))
+        end
+    end
+end
+
 function meta:on_destroyed()
     --IRP清理：它在目标容器上留下的计数项与轮询快照都要撤掉
     --（remove_count_item 会把它从目标容器所在归属地的计数里同步扣掉）
@@ -542,6 +558,8 @@ function meta:on_destroyed()
             local m = M.ensure_reader_meta(e)
             changes.dirty_reader_region(m)
         end
+        --读取器虚影预览到的网络同样会因平台拆除/网络分裂而改变：登记它们的面板刷新
+        dirty_ghost_reader_panels(self.surface, self.lbox)
         for _, e in ipairs(find_count_entities(self.surface, self.cbox)) do
             local m = M.ensure_entity_meta(e)
             changes.dirty_count_entitiy_region(m)
@@ -550,6 +568,19 @@ function meta:on_destroyed()
 end
 
 --================================================================================================
+
+---记录"可能开有面板"的读取器位置。
+---读取器（真实实体与读取器虚影）都能打开面板，而面板以「表面 + 位置」定位（见 gui.lua）。
+---实体被销毁后不能再读它的 position，所以登记时就把位置存下来：销毁事件会用它登记面板
+---刷新——同位置若已换成新读取器就切过去，没有就关掉面板。
+---@param m meta
+---@param entity LuaEntity
+local function track_panel_position(m, entity)
+    if entity.name == READER or (entity.type == "entity-ghost" and entity.ghost_name == READER) then
+        m.panel_surface_index = entity.surface.index
+        m.panel_position = { x = entity.position.x, y = entity.position.y }
+    end
+end
 
 ---注册对象的元信息，元数据中保留了实体摧毁后要访问的数据。
 ---因为on_object_destroyed响应时不带实体数据（已完成销毁），所以才不得不这样实现。
@@ -561,6 +592,7 @@ function M.ensure_entity_meta(entity)
     if m == nil then
         m = meta:new(reg_num, entity)
         objects_meta[reg_num] = m
+        track_panel_position(m, entity)
         changes.dirty_count_entitiy_region(m)
     end
     return m
@@ -574,6 +606,7 @@ function M.ensure_reader_meta(entity)
     if m == nil then
         m = meta:new(reg_num, entity)
         objects_meta[reg_num] = m
+        track_panel_position(m, entity)
         --读取器既是"读取者"也是"计数实体"：
         --  * 读取者身份用 reader_region（按范围模式二选一）；
         --  * 计数实体身份要照常解析归属地，否则它自己身上的计数项
@@ -607,7 +640,11 @@ function M.ensure_roboport_meta(port)
         for _, e in ipairs(port.surface.find_entities_filtered({ area = lbox, name = READER })) do
             local m = M.ensure_reader_meta(e)
             m:reader_set_region(r)
+            --网络变了要重写输出；面板也随这次脏标记按需刷新
+            changes.dirty_reader_output(m)
         end
+        --读取器虚影预览到的网络也会因平台建成而改变：它们的面板要跟着刷新
+        dirty_ghost_reader_panels(port.surface, lbox)
         for _, e in ipairs(find_count_entities(port.surface, cbox)) do
             local m = M.ensure_entity_meta(e)
             m:add_to_region(r)

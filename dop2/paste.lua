@@ -168,8 +168,10 @@ function M.on_settings_pasted(event)
         changes.dirty_reader_region(m)
         changes.dirty_reader_output(m)
     else
-        --读取器虚影：没有归属地与输出，把配置按位置记下，供建成真实读取器时继承
+        --读取器虚影：没有归属地与输出，把配置按位置记下，供建成真实读取器时继承；
+        --同时登记面板刷新（虚影有单位号，可能开着面板）
         bplib.remember_config(target, cfg)
+        changes.dirty_reader_panel(meta.ensure_entity_meta(target))
     end
 end
 

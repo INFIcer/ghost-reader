@@ -4,7 +4,12 @@
 --
 -- 面板只做展示与配置写入，不参与计数管线：计数由归属地（region）维护，
 -- 面板仅把 meta.output_of(读取器) 的结果画出来；配置改动照常只置脏标记，
--- 由 on_tick 统一重算，故 GUI 与性能无关。
+-- 由 on_tick 统一重算。
+--
+-- **刷新是按需的，不是每帧的**：只有「面板已打开」且「面板对应的读取器发生变动」
+-- （计数/归属地/配置）时才重画。events 消费读取器脏标记时把读取器位置登记到
+-- dirty_panels（见 M.mark_dirty），on_tick 末调用 M.refresh_dirty() 处理一次；
+-- 没有面板打开时 on_tick 完全不碰 GUI，也不再遍历玩家/重算信号指纹。
 --
 -- 面板对应的读取器以「表面号 + 位置」记在 frame.tags 上（tags 只支持基本类型，
 -- 不能存实体引用），刷新时按位置反查，因此真实读取器与读取器虚影都能打开面板。
@@ -26,8 +31,6 @@ local GR_GUI_FRAME = "gr_gui_frame"
 local GR_GUI_CONTENT = "gr_gui_content"
 local GR_GUI_TABLE_FRAME = "gr_gui_table_frame"
 local GR_GUI_TABLE = "gr_gui_table"
-local GR_GUI_STATUS = "gr_gui_status"
-local GR_GUI_STATUS_ROW = "gr_gui_status_row"
 local GR_GUI_MODE = "gr_gui_mode"
 local GR_GUI_FILTER = "gr_gui_filter"
 local GR_GUI_COUNT = "gr_gui_count"
@@ -273,44 +276,118 @@ local function add_dropdown_row(parent, caption, name, options, selected)
     end
 end
 
----添加一行状态文本
----@param parent LuaGuiElement
----@param caption LocalisedString
----@param caption_value LocalisedString
-local function add_status_row(parent, caption, caption_value)
-    local flow = add_row(parent, caption)
-    --行 flow 也命名：状态标签在 flow 里面，刷新时要两层索引才取得到
-    flow.name = GR_GUI_STATUS_ROW
-    flow.add { type = "label", name = GR_GUI_STATUS, caption = caption_value }
-end
+--================================================================================================
+-- 按需刷新：只有「面板已打开 + 对应读取器发生变化」时才重画
+--================================================================================================
+--
+-- events 消费读取器脏标记时把读取器位置登记到 dirty_panels（M.mark_dirty）；
+-- on_tick 末调用 M.refresh_dirty() 统一处理一次，且只处理 game.players 里确实开着
+-- 面板、位置又被登记过的面板。没有面板打开时登记与刷新都是空操作（open_panels 为 0），
+-- 未打开面板的读取器变动不会产生任何 GUI 开销。
 
----取状态标签（它在状态行的 flow 里，不是内容区的直接子元素）
----@param content LuaGuiElement
----@return LuaGuiElement|nil
-local function status_label(content)
-    local row = content[GR_GUI_STATUS_ROW]
-    if not (row and row.valid) then return nil end
-    local label = row[GR_GUI_STATUS]
-    if label and label.valid then return label end
-end
-
----面板信号表指纹：内容没变就不重建。
----重建要先把表清空再逐个新建按钮，是面板刷新的主要开销；信号没变时每帧重建纯属浪费。
----@type table<uint64,string>
-local table_fingerprints = {}
-
----把信号计数表压成指纹（物品名:品质=数量，排序后拼接）
----@param counts counter
+---面板位置键（tags 只支持基本类型，位置拼成字符串当表键）。
+---读取器与读取器虚影共用同一套键：虚影建成真实读取器后位置不变、单位号会变。
+---@param surface_index int
+---@param x number
+---@param y number
 ---@return string
-local function counts_fingerprint(counts)
-    local parts = {}
-    for item, qualities in pairs(counts) do
+local function pos_key(surface_index, x, y)
+    return tostring(surface_index) .. ":" .. tostring(x) .. ":" .. tostring(y)
+end
+
+---面板位置键（tags 上记着面板对应的读取器位置）
+---@param frame LuaGuiElement
+---@return string
+local function panel_key(frame)
+    local tags = frame.tags
+    return pos_key(tags.surface, tags.x, tags.y)
+end
+
+---当前打开着的面板数量。
+---用于让「没有面板打开」成为真正的零开销：读取器变动时连位置键都不拼。
+---读档/配置变化后模块级计数会归零，但面板本身还在存档里，故由 M.resync_open_panels()
+---在重建时按实际面板数重算（见 events.rebuild）。
+---@type int
+local open_panels = 0
+
+---本帧需要重画的面板位置（读取器变动时由 events 登记，M.refresh_dirty 消费后清空）
+---@type table<string,true>
+local dirty_panels = {}
+
+---面板状态：按「玩家 + 面板位置」分开存。
+---* unit：上次显示的读取器单位号（虚影建成真实读取器后会变，用于决定是否换预览实体）
+---* counts：上次显示的信号表引用（深比较用：内容没变就不重建 GUI 元素）。
+---  meta.read_region_output 返回的是归属地按"过滤器组合"缓存的表，创建后不会再被改动
+---  （任何计数变化都会整份作废缓存、之后重新建表），所以保存引用就能当作上次内容的快照。
+---用玩家做外层键：多个玩家可以同时打开同一个读取器，各自的面板必须各自刷新
+---（旧实现的全局指纹会让后遍历到的玩家面板停在旧内容上）。
+---@type table<uint32, table<string, {unit:uint64|nil, counts:counter|nil}>>
+local panel_states = {}
+
+---取（或创建）某个玩家某个面板的状态
+---@param player LuaPlayer
+---@param key string
+---@return table
+local function get_panel_state(player, key)
+    local states = panel_states[player.index]
+    if not states then
+        states = {}
+        panel_states[player.index] = states
+    end
+    local state = states[key]
+    if not state then
+        state = {}
+        states[key] = state
+    end
+    return state
+end
+
+---面板销毁时清掉它的状态（避免按玩家/按面板累积状态表）
+---@param player LuaPlayer
+---@param frame LuaGuiElement
+local function clear_panel_state(player, frame)
+    local states = panel_states[player.index]
+    if not states then return end
+    states[panel_key(frame)] = nil
+    if next(states) == nil then panel_states[player.index] = nil end
+end
+
+---销毁面板：清状态 + 清 player.opened + 减打开计数
+---@param player LuaPlayer
+---@param frame LuaGuiElement
+local function destroy_panel(player, frame)
+    if not (frame and frame.valid) then return end
+    clear_panel_state(player, frame)
+    if player.opened == frame then player.opened = nil end
+    frame.destroy()
+    if open_panels > 0 then open_panels = open_panels - 1 end
+    --最后一个面板关掉后，本帧排队的刷新登记已经没有意义，直接丢弃
+    if open_panels == 0 then dirty_panels = {} end
+end
+
+---两份信号计数表内容是否相同（item -> quality -> count 两层深比较）。
+---用作重建信号表的门：归属地计数变了但当前筛选/品质下看不到变化时，不重建 GUI 元素。
+---不拼指纹串、不排序：脏帧本来就可能每帧都来，这里只做 O(信号数) 的比较。
+---@param a counter|nil
+---@param b counter
+---@return boolean
+local function same_counts(a, b)
+    if a == b then return true end
+    if not (a and b) then return false end
+    for item, qualities in pairs(a) do
+        local other = b[item]
+        if not other then return false end
         for quality, count in pairs(qualities) do
-            parts[#parts + 1] = item .. ":" .. quality .. "=" .. tostring(count)
+            if other[quality] ~= count then return false end
+        end
+        for quality in pairs(other) do
+            if qualities[quality] == nil then return false end
         end
     end
-    table.sort(parts)
-    return table.concat(parts, ";")
+    for item in pairs(b) do
+        if a[item] == nil then return false end
+    end
+    return true
 end
 
 --================================================================================================
@@ -322,21 +399,6 @@ end
 -- Lua 侧只负责告诉它看哪个实体。
 -- （rendering.draw_* 只能画在世界里，ScriptRenderTarget 不接受 GUI 目标，所以「把渲染挂到
 -- 面板上」的唯一正确形态就是这个元素，不是自己拼接贴图。）
-
----面板身份指纹：面板位置 -> 当前「连接至」显示的读取器单位号。
----用位置而不是单位号做键：读取器虚影建成真实读取器后单位号会变，位置不变。
----@type table<string,uint64>
-local identity_fingerprints = {}
-
----面板位置键（tags 只支持基本类型，拼成字符串当表键）
----@param frame LuaGuiElement
----@return string
-local function panel_key(frame)
-    local tags = frame.tags
-    return tostring(tags.surface) .. ":" .. tostring(tags.x) .. ":" .. tostring(tags.y)
-end
-
-
 
 ---@param parent LuaGuiElement
 ---@param entity LuaEntity 读取器（真实实体或其虚影）
@@ -370,57 +432,87 @@ local function add_entity_preview(parent, entity)
 end
 
 
----刷新顶栏（「连接至」+ 预览）：只在指向的读取器变化时才写 GUI。
----虚影建成真实读取器后单位号会变，所以要跟着换；预览本身由引擎实时绘制，不需要重画。
+---刷新一个已打开的面板（预览/连接信息/信号表）。
+---读取器已不存在时关掉面板：虚影建成真实读取器时同位置会立刻出现新读取器，面板跟着换过去；
+---被挖掉/虚影取消时同位置没有读取器，面板随之关闭。
+---@param player LuaPlayer
 ---@param frame LuaGuiElement
----@param content LuaGuiElement
----@param entity LuaEntity|nil 当前读取器；nil 表示读取器已不存在
-local function refresh_identity(frame, content, entity)
-    local key = panel_key(frame)
-    local unit = entity and entity.unit_number
+local function refresh_panel(player, frame)
+    --先确认读取器还在：面板对应的读取器没了就关闭面板（这一步不依赖面板内容是否完整）
+    local entity = frame_reader(frame)
+    if not entity then
+        destroy_panel(player, frame)
+        return
+    end
 
-    if identity_fingerprints[key] == unit then return end
-    identity_fingerprints[key] = unit
+    local content = frame[GR_GUI_CONTENT]
+    if not (content and content.valid) then return end
 
-    local preview_box = content[GR_GUI_PREVIEW_BOX]
-    if preview_box and preview_box.valid then
-        local preview = preview_box[GR_GUI_PREVIEW]
-        preview.entity = entity
+    local state = get_panel_state(player, panel_key(frame))
+    --顶栏：读取器换了（虚影建成真实读取器）就换预览实体；预览内容由引擎实时绘制，不需要重画
+    local unit = entity.unit_number
+    if state.unit ~= unit then
+        state.unit = unit
+        local preview_box = content[GR_GUI_PREVIEW_BOX]
+        if preview_box and preview_box.valid then
+            local preview = preview_box[GR_GUI_PREVIEW]
+            if preview and preview.valid then preview.entity = entity end
+        end
+    end
+
+    --「连接至」状态行（读到哪个归属地/是否不在物流网络内）
+    update_link_row(content, entity)
+
+    --信号表：内容没变就不重建（重建要 clear + 逐个新建按钮，是面板刷新的主要开销）。
+    --虚影没有归属地与电路输出，但面板同样显示按位置预览的信号（与 dop1 一致）
+    local counts = meta.output_of(entity)
+    if not same_counts(state.counts, counts) then
+        state.counts = counts
+        local table_frame = content[GR_GUI_TABLE_FRAME]
+        if table_frame and table_frame.valid then
+            rebuild_table(table_frame[GR_GUI_TABLE], counts)
+        end
     end
 end
 
----刷新一个玩家的面板（状态行 + 信号表）
----@param player LuaPlayer
-local function refresh_player(player)
-    local frame = player.gui.screen[GR_GUI_FRAME]
-    if not (frame and frame.valid) then return end
-    local content = frame[GR_GUI_CONTENT]
-    if not (content and content.valid) then return end
-    --读取器已不存在（虚影已建成真实读取器/已被挖掉）：面板留着但不再刷新
-    local entity = frame_reader(frame)
-    if not entity then
-        --预览区要清掉，否则会指着一个失效实体
-        frame.destroy()
-        return
-    end
-    --顶栏：读取器换了（虚影建成真实读取器）就换「连接至」与预览
-    refresh_identity(frame, content, entity)
+---登记一个位置的面板待刷新（读取器变动时由 events 调用）。
+---没有面板打开时直接返回：不拼位置键、不做任何事。
+---@param surface_index int|nil
+---@param position MapPosition|nil
+local function mark_dirty(surface_index, position)
+    if open_panels == 0 then return end
+    if type(surface_index) ~= "number" or not position then return end
+    dirty_panels[pos_key(surface_index, position.x, position.y)] = true
+end
 
-    -- local row = content[GR_GUI_LINK_ROW]
-    -- if row and row.valid then
-    --     local value = row[GR_GUI_LINK_VALUE]
-    --     if value and value.valid then value.caption = status_text(entity) end
-    -- end
-    update_link_row(content, entity)
-    --local status = status_label(content)
-    --if status then status.caption = status_text(entity) end
-    --虚影没有归属地与电路输出，但面板同样显示按位置预览的信号（与 dop1 一致）
-    local counts = meta.output_of(entity)
-    local unit = entity.unit_number
-    local fingerprint = counts_fingerprint(counts)
-    if table_fingerprints[unit] ~= fingerprint then
-        table_fingerprints[unit] = fingerprint
-        rebuild_table(content[GR_GUI_TABLE_FRAME][GR_GUI_TABLE], counts)
+---刷新本帧被登记过的已打开面板。
+---没有登记时立即返回（不遍历玩家、不重算信号）；有登记时先取走登记表，
+---再只遍历一次 player，处理位置命中且确实开着的面板。
+---
+---dirty_regions：本帧计数发生变化的归属地集合（可选）。读取器虚影不是归属地读者
+---（它没有 reader_region），拿不到 dirty_reader_output，所以虚影面板还要靠
+---"面板当前所在归属地是否在集合里"来判断；真实读取器面板一般已被登记位置，不会重复刷新。
+---@param dirty_regions table<region,true>|nil
+local function refresh_dirty(dirty_regions)
+    local keys = dirty_panels
+    local regions = (dirty_regions and next(dirty_regions)) and dirty_regions or nil
+    if next(keys) == nil and not regions then return end
+    dirty_panels = {}
+    for _, player in pairs(game.players) do
+        if player and player.valid then
+            local frame = player.gui.screen[GR_GUI_FRAME]
+            if frame and frame.valid then
+                if keys[panel_key(frame)] then
+                    refresh_panel(player, frame)
+                elseif regions then
+                    local entity = frame_reader(frame)
+                    local panel_region = entity and meta.region_of(entity)
+                    if panel_region and regions[panel_region] then
+                        refresh_panel(player, frame)
+                    end
+                end
+            end
+        end
     end
 end
 
@@ -429,13 +521,14 @@ end
 ---@param entity LuaEntity 读取器（真实实体或其虚影）
 local function build(player, entity)
     local old = player.gui.screen[GR_GUI_FRAME]
-    if old and old.valid then old.destroy() end
+    if old and old.valid then destroy_panel(player, old) end
     player.opened = nil
 
     local unit = entity.unit_number
     local frame = player.gui.screen.add {
         type = "frame", name = GR_GUI_FRAME, direction = "vertical", tags = pos_tag(entity),
     }
+    open_panels = open_panels + 1
     frame.auto_center = true
     frame.style.maximal_height = 1450
 
@@ -459,20 +552,21 @@ local function build(player, entity)
     --顶栏：连接信息 + 实体预览（对齐原版实体面板：先说明属于哪个读取器，再给实时预览）
     add_link_row(content, entity)
     add_entity_preview(content, entity)
-    identity_fingerprints[panel_key(frame)] = unit
     add_dropdown_row(content, { "gr-gui.range-mode" }, GR_GUI_MODE, range_options(), config.get_mode(unit))
-    --add_status_row(content, { "gr-gui.current-range" }, status_text(entity))
     add_dropdown_row(content, { "gr-gui.filter" }, GR_GUI_FILTER, filter_options(), config.get_filter(unit))
     add_dropdown_row(content, { "gr-gui.qty" }, GR_GUI_COUNT, count_options(), config.get_count(unit))
     add_dropdown_row(content, { "gr-gui.quality" }, GR_GUI_QUALITY, quality_options(), config.get_quality(unit))
     content.add { type = "line" }
     local table_flow = content.add { type = "scroll-pane", name = GR_GUI_TABLE_FRAME, style = "deep_slots_scroll_pane" }
-    local frame = table_flow.add { type = "frame", style = "logistic_section_subheader_frame" }
-    frame.style.width = GR_GUI_PREVIEW_WIDTH
-    frame.add { type = "label", caption = { "gr-gui.output" }, style = "subheader_label" }
+    local subheader_frame = table_flow.add { type = "frame", style = "logistic_section_subheader_frame" }
+    subheader_frame.style.width = GR_GUI_PREVIEW_WIDTH
+    subheader_frame.add { type = "label", caption = { "gr-gui.output" }, style = "subheader_label" }
     table_flow.add { type = "table", name = GR_GUI_TABLE, style = "gr_table", column_count = 10 }
+    --记下面板当前显示的状态：之后的按需刷新用它们判断"读取器换了没有""信号变了没有"
     local counts = meta.output_of(entity)
-    table_fingerprints[unit] = counts_fingerprint(counts)
+    local state = get_panel_state(player, panel_key(frame))
+    state.unit = unit
+    state.counts = counts
     rebuild_table(table_flow[GR_GUI_TABLE], counts)
 
     player.opened = frame
@@ -501,7 +595,7 @@ function M.on_gui_closed(event)
     local player = game.get_player(event.player_index)
     if not player then return end
     local frame = player.gui.screen[GR_GUI_FRAME]
-    if frame and frame.valid then frame.destroy() end
+    if frame and frame.valid then destroy_panel(player, frame) end
 end
 
 ---面板关闭按钮
@@ -514,8 +608,7 @@ function M.on_gui_click(event)
     if not player then return end
     local frame = player.gui.screen[GR_GUI_FRAME]
     if not (frame and frame.valid) then return end
-    if player.opened == frame then player.opened = nil end
-    frame.destroy()
+    destroy_panel(player, frame)
 end
 
 ---下拉框配置变更：写入配置并按变更内容置脏（范围模式改归属地，其余只改输出）
@@ -575,18 +668,51 @@ function M.on_gui_selection_state_changed(event)
     end
 
     local player = game.get_player(event.player_index)
-    if player then refresh_player(player) end
+    if player then
+        --配置变更立即生效：登记所有打开该读取器的面板并当场刷新一次
+        --（不等到下一帧；也用不到遍历全体玩家之外的东西）
+        mark_dirty(reader.surface.index, reader.position)
+        refresh_dirty()
+    end
 end
 
 --================================================================================================
 -- 由主管线驱动
 --================================================================================================
 
----刷新所有已打开的面板（帧末输出后调用）
-function M.refresh_open()
+---当前是否有面板打开。events 用它把"没有面板打开"的情况做成真正的零开销：
+---连位置键都不拼、也不调用 refresh_dirty。
+---@return boolean
+function M.has_open_panels()
+    return open_panels > 0
+end
+
+---重建后按实际面板数重算打开计数。
+---面板是存档的一部分、会随读档保留，而模块级计数会随 control.lua 重跑归零，
+---所以读档/配置变化后的全量重建末尾必须调一次（见 events.rebuild）。
+function M.resync_open_panels()
+    local count = 0
     for _, player in pairs(game.players) do
-        if player and player.valid then refresh_player(player) end
+        if player and player.valid then
+            local frame = player.gui.screen[GR_GUI_FRAME]
+            if frame and frame.valid then count = count + 1 end
+        end
     end
+    open_panels = count
+    if open_panels == 0 then dirty_panels = {} end
+end
+
+---登记一个位置的面板待刷新（读取器变动时由 events 调用）。
+---@param surface_index int|nil
+---@param position MapPosition|nil
+function M.mark_dirty(surface_index, position)
+    mark_dirty(surface_index, position)
+end
+
+---刷新本帧被登记过的已打开面板（on_tick 末由 events 调用）。
+---@param dirty_regions table<region,true>|nil 本帧计数变化的归属地（供虚影面板判断）
+function M.refresh_dirty(dirty_regions)
+    refresh_dirty(dirty_regions)
 end
 
 ---读取器悬浮提示内容指纹：内容没变就不重写。

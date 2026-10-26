@@ -104,9 +104,12 @@ function region:apply_count(kind, item, quality, count)
     end
 end
 
----归属地计数变了：作废按过滤器组合缓存的读取结果，并让归属地内所有读取器重写输出
+---归属地计数变了：作废按过滤器组合缓存的读取结果，并让归属地内所有读取器重写输出。
+---同时把归属地本身登记为本帧"计数变了"：读取器虚影不是归属地读者，
+---它的面板靠 gui.refresh_dirty 按"面板当前所在归属地"判断是否刷新。
 function region:invalidate_outputs()
     self.outputs = nil
+    changes.dirty_region_count(self)
     for reader, _ in pairs(self.readers) do
         --读取器可能已经失效（标脏与处理之间被拆掉）：这里照样登记，
         --由帧末的读取器计数清理统一摘除元信息（见 events.on_tick）。

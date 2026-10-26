@@ -172,7 +172,9 @@ The mod prefers event-driven updates over per-frame polling:
 
 - Ghost create/destroy, deconstruction/upgrade marking, roboport add/remove, IRP creation, and config changes only set dirty flags; `on_tick` resolves them once.
 - When a region itself is destroyed (network merge) or a port removal shrinks a network, its members are marked dirty and re-resolved.
-- An open panel refreshes every tick, but the **signal table is fingerprint-gated**: GUI elements are not rebuilt while the content is unchanged.
+- An open panel is **not part of the per-tick loop**: only when the panel is open *and* its reader changed this tick (counts / region / config) is it registered by position and refreshed once at frame end. With no panel open, `on_tick` does no GUI work at all (no player iteration, no signal recomputation). On refresh, the signal table is content-compared: unchanged content does not rebuild GUI elements.
+- A ghost reader's panel is matched to its **currently previewed region**: it refreshes when that region's counts change (ghosts are not region readers, so they never receive reader dirty marks).
+- Exception: renaming a logistic network (`custom_name`) has no native event, so the network name in the panel's "connected to" row updates on the reader's next change (we do not bring back per-tick polling for it).
 
 ## Blueprints and copy-paste
 
@@ -189,7 +191,7 @@ The mod prefers event-driven updates over per-frame polling:
 - Everything is dirty-marked and resolved once per tick; there is practically no whole-surface scanning. A roboport's construction area is scanned with type filters (only ghosts, tile ghosts, tile proxies, IRPs and deconstruction/upgrade-marked entities are registered), so trees and rocks in the area are not turned into count entities.
 - Region merging only recomputes when a region is marked dirty; membership changes are plain hash lookups and in-place add/remove.
 - Snapshots have a per-tick budget and active/inactive generations, so steady-state cost is independent of the total number of snapshots.
-- Panel refresh is fingerprint-gated, so no GUI elements are created or destroyed while signals are unchanged.
+- Panel refresh is on demand (panel open + its reader changed); unchanged signals create or destroy no GUI elements, and a closed panel costs nothing per tick.
 
 ## Pitfalls worth remembering
 

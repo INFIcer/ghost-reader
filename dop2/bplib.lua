@@ -161,10 +161,14 @@ local function apply_to_reader(entity, cfg)
     if not (entity and entity.valid) then return end
     local unit = entity.unit_number
     if type(unit) == "number" then config.apply_config(unit, cfg) end
-    --虚影没有归属地与电路输出，只需记下配置；真实读取器要重算输出
     if entity.name == READER then
+        --真实读取器要重算：范围模式可能变了，归属地要重新解析；其余配置只需重写输出
         local m = meta.ensure_reader_meta(entity)
+        changes.dirty_reader_region(m)
         changes.dirty_reader_output(m)
+    else
+        --虚影没有归属地与电路输出，但可能开着面板（虚影有单位号，可开面板），登记面板刷新
+        changes.dirty_reader_panel(meta.ensure_entity_meta(entity))
     end
 end
 
