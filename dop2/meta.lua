@@ -34,6 +34,10 @@ end
 ---@type table<uint64,meta>
 local objects_meta = {}
 
+---还没有物流网络、尚未接入的无人机平台（等待重试）。
+---@type table<meta,true>
+local pending_roboports = {}
+
 ---无人机平台建设区域附近要关注的实体类型。
 ---只登记这些：区域的计数表会被反复遍历重算，把树/石头/装饰这些永远不会产生
 ---计数的实体也登记进来纯属浪费（一个平台的建设区域里就有上千个）。
@@ -617,6 +621,38 @@ function M.ensure_reader_meta(entity)
     return m
 end
 
+---把平台接入它所在的物流网络：登记网络归属地、记下范围，并让范围内的读取器/计数实体归入该网络。
+---平台没有物流网络时（如未通电）port.logistic_network 为 nil，不能拿去注册销毁事件，
+---此时什么都不做、返回 false，留待之后重试。
+---@param m meta
+---@param port LuaEntity
+---@return boolean 是否已接入物流网络
+local function attach_roboport_network(m, port)
+    local logistic_network = port.logistic_network
+    if not logistic_network then return false end
+    local r = region.ensure_region_logistic_network(logistic_network)
+    m.roboport_region = r
+    local logistic_cell = port.logistic_cell
+    local lbox = box(port.position, logistic_cell.logistic_radius)
+    local cbox = box(port.position, logistic_cell.construction_radius)
+    m.cbox = cbox
+    m.lbox = lbox
+
+    for _, e in ipairs(port.surface.find_entities_filtered({ area = lbox, name = READER })) do
+        local m = M.ensure_reader_meta(e)
+        m:reader_set_region(r)
+        --网络变了要重写输出；面板也随这次脏标记按需刷新
+        changes.dirty_reader_output(m)
+    end
+    --读取器虚影预览到的网络也会因平台建成而改变：它们的面板要跟着刷新
+    dirty_ghost_reader_panels(port.surface, lbox)
+    for _, e in ipairs(find_count_entities(port.surface, cbox)) do
+        local m = M.ensure_entity_meta(e)
+        m:add_to_region(r)
+    end
+    return true
+end
+
 ---@return meta register_meta 注册的元信息
 ---@param port LuaEntity 要进行注册的机器人平台
 function M.ensure_roboport_meta(port)
@@ -629,28 +665,28 @@ function M.ensure_roboport_meta(port)
         --这里不直接 add_to_region：平台所在物流网络当时可能还没解析好，
         --交给通用的归属地解析（下一帧按位置算出它落在哪些网络/表面）更稳。
         changes.dirty_count_entitiy_region(m)
-        local r = region.ensure_region_logistic_network(port.logistic_network)
-        m.roboport_region = r
-        local logistic_cell = port.logistic_cell
-        local lbox = box(port.position, logistic_cell.logistic_radius)
-        local cbox = box(port.position, logistic_cell.construction_radius)
-        m.cbox = cbox
-        m.lbox = lbox
-
-        for _, e in ipairs(port.surface.find_entities_filtered({ area = lbox, name = READER })) do
-            local m = M.ensure_reader_meta(e)
-            m:reader_set_region(r)
-            --网络变了要重写输出；面板也随这次脏标记按需刷新
-            changes.dirty_reader_output(m)
-        end
-        --读取器虚影预览到的网络也会因平台建成而改变：它们的面板要跟着刷新
-        dirty_ghost_reader_panels(port.surface, lbox)
-        for _, e in ipairs(find_count_entities(port.surface, cbox)) do
-            local m = M.ensure_entity_meta(e)
-            m:add_to_region(r)
+    end
+    --尚未接入网络（新登记，或之前没有网络）：现在接入，仍没有网络就挂进待重试集合
+    if m.roboport_region == nil then
+        if attach_roboport_network(m, port) then
+            pending_roboports[m] = nil
+        else
+            pending_roboports[m] = true
         end
     end
     return m
+end
+
+---重试接入还没有物流网络的平台（由 on_tick 低频调用）。
+---平台获得物流网络（如通电）没有对应事件，只能轮询；集合只含无网络的平台，通常为空。
+function M.retry_pending_roboports()
+    for m, _ in pairs(pending_roboports) do
+        if not m:vaild() then
+            pending_roboports[m] = nil
+        elseif attach_roboport_network(m, m.entity) then
+            pending_roboports[m] = nil
+        end
+    end
 end
 
 ---@param reg_num uint64 注册号
@@ -681,6 +717,7 @@ end
 ---元信息依附实体，会随世界状态重新登记；引擎侧的销毁注册是幂等的，不受影响。
 function M.reset()
     objects_meta = {}
+    pending_roboports = {}
 end
 
 return M

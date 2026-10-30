@@ -547,6 +547,11 @@ local function on_tick()
     --快照轮询：内容物/IRP 变化已由计数项修改方法增量写进归属地；位置变化只标归属地脏
     snapshot.on_tick()
 
+    --无物流网络的平台（如未通电）没有"获得网络"的事件，每秒重试接入一次
+    if game.tick % 60 == 0 then
+        meta.retry_pending_roboports()
+    end
+
     --清理计数实体归属地(由实体移动引发)
     for ce, _ in pairs(changes.current.dirty_count_entities_region) do
         ---@type meta
